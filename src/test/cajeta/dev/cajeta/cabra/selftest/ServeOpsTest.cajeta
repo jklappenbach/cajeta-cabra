@@ -114,6 +114,7 @@ public class ServeOpsTest {
         // ...and still serves the next request.
         boolean cont2 = s.handleLine("{\"op\":\"health\",\"id\":10}");
         Assert.isTrue(cont2);
+        s.drive();
         s.close();
 
         ArrayList<String> lines #= ServeOpsTest.linesOf(path);
@@ -140,6 +141,7 @@ public class ServeOpsTest {
         Serve s #= ServeOpsTest.serveOver(path, #e);
         s.handleLine("{\"op\":\"generate\",\"id\":1,\"prompt\":\"hello\","
             + "\"n\":4,\"temp\":0}");
+        s.drive();
         s.close();
 
         ArrayList<String> lines #= ServeOpsTest.linesOf(path);
@@ -169,6 +171,7 @@ public class ServeOpsTest {
         Serve s #= ServeOpsTest.serveOver(path, #e);
         s.handleLine("{\"op\":\"generate\",\"id\":2,\"prompt\":\"hello\","
             + "\"n\":16,\"temp\":0,\"stop\":[\"e\"]}");
+        s.drive();
         s.close();
 
         ArrayList<String> lines #= ServeOpsTest.linesOf(path);
@@ -200,6 +203,7 @@ public class ServeOpsTest {
         s.handleLine("{\"op\":\"health\",\"id\":7}");
         s.setState("ready");
         s.handleLine("{\"op\":\"health\",\"id\":8}");
+        s.drive();
         s.close();
 
         ArrayList<String> lines #= ServeOpsTest.linesOf(path);
@@ -232,6 +236,7 @@ public class ServeOpsTest {
         Assert.isTrue(cont);
         boolean end = s.handleLine("{\"op\":\"shutdown\"}");
         Assert.isFalse(end);
+        s.drive();
         s.close();
 
         ArrayList<String> lines #= ServeOpsTest.linesOf(path);
@@ -257,6 +262,7 @@ public class ServeOpsTest {
         boolean cont = s.handleLine("{\"op\":\"chat\",\"id\":4,"
             + "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
         Assert.isTrue(cont);
+        s.drive();
         s.close();
 
         ArrayList<String> lines #= ServeOpsTest.linesOf(path);
@@ -280,6 +286,7 @@ public class ServeOpsTest {
         s.setTemplate(#t);
         s.handleLine("{\"op\":\"chat\",\"id\":5,\"n\":3,\"temp\":0,"
             + "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+        s.drive();
         s.close();
 
         ArrayList<String> lines #= ServeOpsTest.linesOf(path);

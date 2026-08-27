@@ -77,6 +77,7 @@ public final class Main {
         // guessing one (plan 3.2.1).
         ChatTemplate tpl #= ChatOp.forModel(model, e.tokenizer());
         Serve s = heap Serve(#e, #fw, model, ctx);
+        s.setCapacity(maxSeqs);
         if (tpl != null) {
             s.setTemplate(#tpl);
         } else {
@@ -98,7 +99,17 @@ public final class Main {
             if (!s.handleLine(line)) {
                 break;
             }
+            // Submit-then-drive. Without a non-blocking stdin there is no
+            // way to notice a SECOND line while the first is decoding, so
+            // v1 drives after each line and requests do not actually
+            // overlap here — the batching machinery is exercised, the
+            // concurrency is not. Plan 4.2.1's reader fiber is what lets
+            // lines arrive during a drive; until then this is honest
+            // serial behaviour through the multiplexed path.
+            s.drive();
         }
+        // EOF with work still in flight: finish it before exiting.
+        s.drive();
         System.stderr.println("cabra: shutdown");
         return 0;
     }

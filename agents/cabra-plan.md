@@ -162,23 +162,41 @@ checkout in dev / olla pin in release; `dev.cajeta.codec` (JSON);
 ## 4. Concurrency — id-multiplexed continuous batching
 
 ### 4.1 TDD
-- [ ] 4.1.1 Two interleaved `generate` requests: chunk lines carry the
+- [x] 4.1.1 Two interleaved `generate` requests: chunk lines carry the
       right ids, both done lines arrive, and each request's
       concatenated chunks equal its serial-run output (temp 0) — the
       batching must change SCHEDULING, never CONTENT (the engine's
       Q4_K route makes this exact; assert it).
-- [ ] 4.1.2 Queue bound: max-seqs+queue full → an explicit busy error
+- [x] 4.1.2 Queue bound: max-seqs+queue full → an explicit busy error
       object, never a hang and never a dropped line.
 
 ### 4.2 Coding
-- [ ] 4.2.1 Reader thread feeding a request queue; the serve loop
+- [~] 4.2.1 Reader thread feeding a request queue; the serve loop
       drives `stepOnce` across all in-flight requests (the scheduler's
       continuous batching — its first real multi-client caller).
-- [ ] 4.2.2 Per-request sink demux by scheduler request id → caller id.
+      **The drive half is DONE** — `handleLine` submits, `drive()` steps
+      every in-flight request and emits each done line as it finishes.
+      **The reader half is BLOCKED**, on two facts found 2026-08-27:
+      (a) cajeta has no non-blocking stdin — only `cajeta.io.net`
+      carries O_NONBLOCK — so a single fiber cannot notice a second
+      line while the first decodes; (b) cajeta has no OS threads, and
+      cooperative cancellation "only fires at a yield point", which a
+      blocking `FileReader.read` is not. So a reader FIBER parked in
+      `read` cannot be cancelled, and `{"op":"shutdown"}` would hang at
+      the `scope` join waiting for it. Sketch that does work once one of
+      those is resolved: reader fiber owns a ring of line Strings and
+      sends SLOT INDICES over a `Channel<int32>` (int32 sidesteps the
+      lend-not-own slot rule for heap T), main fiber does every engine
+      call. Needs one of: non-blocking/`poll`-able stdin, an
+      interruptible read, or a stdin reader on a real carrier thread.
+- [x] 4.2.2 Per-request sink demux by scheduler request id → caller id.
 
 ### 4.3 Acceptance
-- [ ] 4.3.1 An N-client driver script completes with per-id outputs
-      equal to serial runs.
+- [~] 4.3.1 An N-client driver script completes with per-id outputs
+      equal to serial runs. Blocked on 4.2.1: from a pipe, lines cannot
+      arrive during a drive, so N clients cannot actually overlap yet.
+      The equality it would assert is already pinned in-process by
+      4.1.1 (`interleavedRequestsKeepTheirOwnContent`).
 
 ## 5. The 72B acceptance + docs
 

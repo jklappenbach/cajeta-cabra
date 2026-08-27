@@ -1,0 +1,215 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.collection.ArrayList;
+import cajeta.io.file.File;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.Serve;
+import dev.cajeta.llm.EngineOptions;
+import dev.cajeta.llm.LlmEngine;
+
+/**
+ * Plan 4.1 — id-multiplexed batching.
+ *
+ * 4.1.1's real claim is that batching changes SCHEDULING, never CONTENT.
+ * The way that breaks is the sink: `onToken` arrives with the scheduler's
+ * request id, and a serve loop that routes by "the current request"
+ * silently sends every interleaved token to whichever caller submitted
+ * last. Both requests still finish, both done lines still arrive, and the
+ * transcript still parses — so the ONLY assertion that catches it is
+ * per-id content equality against a serial run.
+ *
+ * The two prompts must differ. Given identical prompts at temp 0 the
+ * outputs are identical too, and a completely broken demux would pass.
+ */
+public class ConcurrencyTest {
+
+    static final String TOY =
+        "../cajeta-llm/src/test/fixtures/gguf/toy.gguf";
+    static final String PROMPT_A = "hello";
+    static final String PROMPT_B = "the quick brown fox";
+
+    public ConcurrencyTest() { return; }
+
+    // ── harness ────────────────────────────────────────────────────────
+
+    static #ArrayList<String> linesOf(String path) {
+        int8[] all #= File.readAllBytes(path);
+        String text = heap String(#all, (int32) all.count());
+        int8[] tb #= text.toBytes();
+        ArrayList<String> out = heap ArrayList<String>();
+        int32 start = 0;
+        int32 i = 0;
+        while (i <= (int32) tb.count()) {
+            boolean atEnd = i == (int32) tb.count();
+            if (atEnd || tb[i] == (int8) 10) {
+                if (i > start) {
+                    String line #= text.substring(start, i);
+                    out.add(#line);
+                }
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    /** Every chunk for `id`, concatenated in arrival order. */
+    static #String chunksFor(ArrayList<String> lines, int64 id) {
+        String acc = "";
+        int32 i = 0;
+        while (i < (int32) lines.count()) {
+            JsonValue v #= Json.parse(lines.get(i));
+            if (v.kind() == JsonValue.OBJECT) {
+                JsonObject o = v.object();
+                if (o.containsKey("chunk")
+                        && o.get("id").asInt64() == id) {
+                    String c #= o.get("chunk").asString();
+                    acc = acc + c;
+                }
+            }
+            i = i + 1;
+        }
+        String r #= acc.substring(0, acc.byteLength());
+        return #r;
+    }
+
+    /** The finish reason on `id`'s done line, or "" when absent. */
+    static #String finishFor(ArrayList<String> lines, int64 id) {
+        int32 i = 0;
+        while (i < (int32) lines.count()) {
+            JsonValue v #= Json.parse(lines.get(i));
+            if (v.kind() == JsonValue.OBJECT) {
+                JsonObject o = v.object();
+                if (o.containsKey("done")
+                        && o.get("id").asInt64() == id) {
+                    String f #= o.get("finish").asString();
+                    return #f;
+                }
+            }
+            i = i + 1;
+        }
+        String empty = "";
+        String r #= empty.substring(0, 0);
+        return #r;
+    }
+
+    static #LlmEngine engine(int32 maxSeqs) {
+        EngineOptions opts = heap EngineOptions(ConcurrencyTest.TOY);
+        opts.ctx = 128;
+        opts.maxSeqs = maxSeqs;
+        return #LlmEngine.load(#opts);
+    }
+
+    static #String genLine(int64 id, String prompt) {
+        String s = "{\"op\":\"generate\",\"id\":" + id + ",\"prompt\":\""
+            + prompt + "\",\"n\":6,\"temp\":0}";
+        return #s;
+    }
+
+    /** Run one request by itself and return its chunk text. */
+    static #String serialRun(String path, int64 id, String prompt) {
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, ConcurrencyTest.TOY, 128);
+        String g #= ConcurrencyTest.genLine(id, prompt);
+        s.handleLine(g);
+        s.drive();
+        s.close();
+        ArrayList<String> lines #= ConcurrencyTest.linesOf(path);
+        return #ConcurrencyTest.chunksFor(lines, id);
+    }
+
+    // ── 4.1.1 ──────────────────────────────────────────────────────────
+
+    @Test
+    public void interleavedRequestsKeepTheirOwnContent() {
+        // Serial baselines, one request per run.
+        String soloA #= ConcurrencyTest.serialRun("tmp/conc-solo-a.jsonl",
+            1L, ConcurrencyTest.PROMPT_A);
+        String soloB #= ConcurrencyTest.serialRun("tmp/conc-solo-b.jsonl",
+            2L, ConcurrencyTest.PROMPT_B);
+        // The premise of the test: different prompts, different output.
+        // Without this a broken demux is indistinguishable from a good one.
+        Assert.isFalse(soloA.equals(soloB));
+
+        // Both in flight at once.
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        String path = "tmp/conc-batched.jsonl";
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, ConcurrencyTest.TOY, 128);
+        String gA #= ConcurrencyTest.genLine(1L, ConcurrencyTest.PROMPT_A);
+        String gB #= ConcurrencyTest.genLine(2L, ConcurrencyTest.PROMPT_B);
+        s.handleLine(gA);
+        s.handleLine(gB);
+        Assert.equals(2, s.inFlight());
+        int32 completed = s.drive();
+        Assert.equals(2, completed);
+        Assert.equals(0, s.inFlight());
+        s.close();
+
+        ArrayList<String> lines #= ConcurrencyTest.linesOf(path);
+        String batchedA #= ConcurrencyTest.chunksFor(lines, 1L);
+        String batchedB #= ConcurrencyTest.chunksFor(lines, 2L);
+        // SCHEDULING may change; CONTENT may not.
+        Assert.equals(soloA, batchedA);
+        Assert.equals(soloB, batchedB);
+        // Both done lines arrived, each on its own id.
+        Assert.equals("budget", ConcurrencyTest.finishFor(lines, 1L));
+        Assert.equals("budget", ConcurrencyTest.finishFor(lines, 2L));
+    }
+
+    // ── 4.1.2 ──────────────────────────────────────────────────────────
+
+    /** Past the bound: an explicit busy error, never a hang and never a
+     *  dropped line — and the requests that DID fit still complete. */
+    @Test
+    public void pastTheCapacityBoundCallersGetABusyError() {
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        String path = "tmp/conc-busy.jsonl";
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, ConcurrencyTest.TOY, 128);
+        s.setCapacity(1);
+
+        String g1 #= ConcurrencyTest.genLine(1L, ConcurrencyTest.PROMPT_A);
+        s.handleLine(g1);
+        Assert.equals(1, s.inFlight());
+        // Second submission has nowhere to go.
+        String g2 #= ConcurrencyTest.genLine(2L, ConcurrencyTest.PROMPT_B);
+        boolean cont = s.handleLine(g2);
+        Assert.isTrue(cont);
+        // It was REFUSED, not queued — still exactly one in flight.
+        Assert.equals(1, s.inFlight());
+        s.drive();
+        s.close();
+
+        ArrayList<String> lines #= ConcurrencyTest.linesOf(path);
+        // id 2 got an error and no done line.
+        boolean sawBusy = false;
+        boolean sawDone2 = false;
+        int32 i = 0;
+        while (i < (int32) lines.count()) {
+            JsonValue v #= Json.parse(lines.get(i));
+            JsonObject o = v.object();
+            if (o.get("id").asInt64() == 2L) {
+                if (o.containsKey("error")) {
+                    sawBusy = true;
+                }
+                if (o.containsKey("done")) {
+                    sawDone2 = true;
+                }
+            }
+            i = i + 1;
+        }
+        Assert.isTrue(sawBusy);
+        Assert.isFalse(sawDone2);
+        // ...and the request that fit still finished normally.
+        Assert.equals("budget", ConcurrencyTest.finishFor(lines, 1L));
+    }
+}

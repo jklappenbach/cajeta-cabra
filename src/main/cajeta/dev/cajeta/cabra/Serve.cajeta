@@ -12,22 +12,28 @@ import dev.cajeta.llm.gen.TokenSink;
 import dev.cajeta.llm.sched.Request;
 
 /**
- * The serial serve loop (plan 2.2.3, extended by 3.2): one request in
- * flight, driven to completion, streamed as it decodes. Implements the
- * engine's `TokenSink` so every generated token becomes a chunk line the
- * moment it lands — EOG ids filtered through `engine.isEog` (spec §4.2),
- * so a stop token never reaches the wire.
+ * The serve loop (plan 2.2.3, extended by 3.2 and 4.2): requests are
+ * SUBMITTED as their lines arrive and DRIVEN together, so several can be
+ * in flight at once and the scheduler's continuous batching gets its
+ * first real multi-client caller.
  *
- * Owns the engine and the protocol writer; the caller (Main, or a test)
- * feeds it lines. Returns false from `handleLine` when the session should
- * end (`shutdown`); EOF is the caller noticing stdin closed, and means
- * the same. Either way the in-flight request has already emitted its done
- * line, because `handleLine` is synchronous — draining is structural
- * here, and stays a real obligation once Unit 4 makes requests concurrent.
+ * `handleLine` submits and returns; `drive()` steps the scheduler until
+ * every tracked request is done, emitting each done line the moment that
+ * request finishes rather than in submission order. Splitting the two is
+ * what makes batching expressible at all — a handleLine that drove to
+ * completion could only ever run one request at a time.
  *
- * Timing for the usage block is measured HERE, not in the engine:
- * prefill_ms is submit-to-first-token, decode_ms first-token-to-done —
- * the same split every serving stack reports, needing no engine hooks.
+ * Implements the engine's `TokenSink`, and the sink is where multiplexing
+ * actually bites: `onToken` arrives with the SCHEDULER's request id, which
+ * is not the caller's. Every chunk is routed through the rid -> caller-id
+ * table below, so two interleaved requests cannot cross-talk. EOG ids are
+ * filtered through `engine.isEog` (spec §4.2), so a stop token never
+ * reaches the wire.
+ *
+ * Timing is measured HERE, per request: prefill_ms is submit-to-first-
+ * token, decode_ms first-token-to-done — the split every serving stack
+ * reports, needing no engine hooks. Under batching these overlap between
+ * requests, which is the point.
  */
 public final class Serve implements TokenSink {
 
@@ -46,10 +52,18 @@ public final class Serve implements TokenSink {
     String state;              // health: "loading" | "ready"
     int32 ctx;                 // context window, in tokens
 
-    // Per-request streaming state (serial: one in flight).
-    int64 curId;
-    int64 t0Ns;
-    int64 firstNs;
+    // ── in-flight table, indexed by slot ───────────────────────────────
+    // Parallel arrays rather than a map: the bound is maxSeqs-ish, a
+    // linear scan beats hashing at this size, and the sink's lookup is on
+    // the per-token path.
+    int32 cap;
+    int32 live;
+    int32[] trRid;             // scheduler request id
+    int64[] trId;              // caller's correlation id
+    int32[] trPromptLen;
+    int64[] trT0Ns;
+    int64[] trFirstNs;
+    boolean[] trOpen;          // slot holds an unfinished request
 
     public Serve(#LlmEngine engine, #FileWriter sink,
             String modelPath, int32 ctx) {
@@ -60,9 +74,14 @@ public final class Serve implements TokenSink {
         this.modelPath = modelPath;
         this.state = "ready";
         this.ctx = ctx;
-        this.curId = 0L;
-        this.t0Ns = 0L;
-        this.firstNs = 0L;
+        this.cap = 32;
+        this.live = 0;
+        this.trRid = heap int32[this.cap];
+        this.trId = heap int64[this.cap];
+        this.trPromptLen = heap int32[this.cap];
+        this.trT0Ns = heap int64[this.cap];
+        this.trFirstNs = heap int64[this.cap];
+        this.trOpen = heap boolean[this.cap];
         this.engine.setSink(this);
     }
 
@@ -81,6 +100,28 @@ public final class Serve implements TokenSink {
      *  once the engine is up. */
     public void setState(String s) {
         this.state = s;
+        return;
+    }
+
+    /** How many requests are currently in flight. */
+    public int32 inFlight() {
+        return this.live;
+    }
+
+    /** Bound on concurrent in-flight requests (plan 4.1.2). Main sets it
+     *  from `--max-seqs`; past it, submissions get a busy answer rather
+     *  than a hang. Only valid before anything is in flight. */
+    public void setCapacity(int32 n) {
+        if (n < 1 || this.live > 0) {
+            return;
+        }
+        this.cap = n;
+        this.trRid = heap int32[n];
+        this.trId = heap int64[n];
+        this.trPromptLen = heap int32[n];
+        this.trT0Ns = heap int64[n];
+        this.trFirstNs = heap int64[n];
+        this.trOpen = heap boolean[n];
         return;
     }
 
@@ -126,16 +167,40 @@ public final class Serve implements TokenSink {
             // RAW encode: the render already carries BOS and the role
             // headers, so encodePrompt would prepend a second BOS.
             int32[] ids #= this.engine.tokenizer().encode(rendered);
-            this.run(r, #ids);
+            this.submitOne(r, #ids);
             return true;
         }
 
         int32[] ids #= this.engine.tokenizer().encodePrompt(r.prompt);
-        this.run(r, #ids);
+        this.submitOne(r, #ids);
         return true;
     }
 
-    void run(Req r, #int32[] ids) {
+    /** Submit one request and start tracking it. Emits an error object
+     *  (and tracks nothing) when it cannot be admitted. */
+    void submitOne(Req r, #int32[] ids) {
+        int32 n = (int32) ids.count();
+        // A prompt that cannot fit the window is never ADMITTED, and an
+        // unadmitted request leaves the scheduler permanently not-done:
+        // it spins to the step cap and throws. Caught here as a plain
+        // answer, because "your prompt is longer than the context" is a
+        // request error, not a server fault — and the third turn of a
+        // chat is exactly where it shows up.
+        if (n + r.n > this.ctx) {
+            Protocol.emitError(this.out, r.id, true,
+                "prompt is " + n + " tokens and -n is " + r.n
+                + ", which exceeds the " + this.ctx + "-token context");
+            return;
+        }
+        int32 slot = this.freeSlot();
+        if (slot < 0) {
+            // Backpressure (plan 4.1.2): an explicit busy answer, never a
+            // hang and never a silently dropped line.
+            Protocol.emitError(this.out, r.id, true,
+                "server busy: " + this.live + " requests in flight");
+            return;
+        }
+
         SampleParams p = heap SampleParams(r.temp, r.seed);
         p.topK = r.topK;
         p.topP = r.topP;
@@ -163,44 +228,103 @@ public final class Serve implements TokenSink {
             p.stops #= sc;
         }
 
-        int32 n = (int32) ids.count();
-        // A prompt that cannot fit the window is never ADMITTED, and an
-        // unadmitted request leaves the scheduler permanently not-done: it spins to
-        // the step cap and throws. Caught here as a plain answer, because
-        // "your prompt is longer than the context" is a request error, not
-        // a server fault — and the third turn of a chat is exactly where
-        // it shows up.
-        if (n + r.n > this.ctx) {
-            Protocol.emitError(this.out, r.id, true,
-                "prompt is " + n + " tokens and -n is " + r.n
-                + ", which exceeds the " + this.ctx + "-token context");
-            return;
-        }
-
-        this.curId = r.id;
-        this.firstNs = 0L;
-        this.t0Ns = Clock.nanoTime();
-        // Bound the drive by what THIS request can need — one step per
-        // generated token plus prefill and admission slack — rather than
-        // a context-derived guess that is both too small for a long
-        // prompt and unbounded slack for a short one.
-        int32 bound = n + r.n + 64;
         int32 rid = 0;
         try {
             rid = this.engine.submitTokens(ids, n, r.n, #p);
-            this.engine.runAll(bound);
         } catch (Throwable t) {
             // Liveness (spec §3.2): a failed request is answered, never
             // fatal. Unit 2 pinned this for malformed lines; an engine
             // fault has to obey the same rule or one bad prompt takes the
             // resident model down with it.
             Protocol.emitError(this.out, r.id, true,
-                "generation failed: " + t.getMessage());
+                "submit failed: " + t.getMessage());
             return;
         }
-        int64 endNs = Clock.nanoTime();
+        this.trRid[slot] = rid;
+        this.trId[slot] = r.id;
+        this.trPromptLen[slot] = n;
+        this.trT0Ns[slot] = Clock.nanoTime();
+        this.trFirstNs[slot] = 0L;
+        this.trOpen[slot] = true;
+        this.live = this.live + 1;
+        return;
+    }
 
-        Request q = this.engine.request(rid);
+    /**
+     * Step the scheduler until every tracked request is done, emitting
+     * each done line as that request finishes. Returns the number of
+     * requests completed.
+     *
+     * The bound is derived from what the in-flight set can actually need
+     * — the longest budget plus its prompt plus admission slack — rather
+     * than a context-derived guess that is both too small for a long
+     * prompt and unbounded slack for a short one.
+     */
+    public int32 drive() {
+        int32 completed = 0;
+        if (this.live == 0) {
+            return 0;
+        }
+        int32 bound = this.driveBound();
+        int32 steps = 0;
+        while (this.live > 0) {
+            boolean more = false;
+            try {
+                more = this.engine.stepOnce();
+            } catch (Throwable t) {
+                this.failAllOpen("generation failed: " + t.getMessage());
+                return completed;
+            }
+            completed = completed + this.reapFinished();
+            if (!more) {
+                break;
+            }
+            steps = steps + 1;
+            if (steps > bound) {
+                this.failAllOpen("scheduler made no progress within "
+                    + bound + " steps");
+                return completed;
+            }
+        }
+        // A final reap: the step that returned "no more" is the one that
+        // finished the last request.
+        completed = completed + this.reapFinished();
+        return completed;
+    }
+
+    int32 driveBound() {
+        int32 worst = 0;
+        int32 i = 0;
+        while (i < this.cap) {
+            if (this.trOpen[i]) {
+                int32 need = this.trPromptLen[i] + this.ctx;
+                if (need > worst) {
+                    worst = need;
+                }
+            }
+            i = i + 1;
+        }
+        return worst + 64;
+    }
+
+    /** Emit done lines for every tracked request that has finished. */
+    int32 reapFinished() {
+        int32 done = 0;
+        int32 i = 0;
+        while (i < this.cap) {
+            if (this.trOpen[i]) {
+                Request q = this.engine.request(this.trRid[i]);
+                if (q.finishReason() != Request.FINISH_NONE) {
+                    this.emitDoneFor(i, q);
+                    done = done + 1;
+                }
+            }
+            i = i + 1;
+        }
+        return done;
+    }
+
+    void emitDoneFor(int32 slot, Request q) {
         String finish = "budget";
         if (q.finishReason() == Request.FINISH_EOS) {
             finish = "eos";
@@ -208,31 +332,79 @@ public final class Serve implements TokenSink {
         if (q.finishReason() == Request.FINISH_STOP) {
             finish = "stop";
         }
+        int64 endNs = Clock.nanoTime();
         int64 pMs = 0L;
         int64 dMs = 0L;
-        if (this.firstNs > 0L) {
-            pMs = (this.firstNs - this.t0Ns) / 1000000L;
-            dMs = (endNs - this.firstNs) / 1000000L;
+        if (this.trFirstNs[slot] > 0L) {
+            pMs = (this.trFirstNs[slot] - this.trT0Ns[slot]) / 1000000L;
+            dMs = (endNs - this.trFirstNs[slot]) / 1000000L;
         } else {
-            pMs = (endNs - this.t0Ns) / 1000000L;
+            pMs = (endNs - this.trT0Ns[slot]) / 1000000L;
         }
-        Protocol.emitDone(this.out, r.id, finish, (int64) n,
-            (int64) q.generatedCount(), pMs, dMs);
+        Protocol.emitDone(this.out, this.trId[slot], finish,
+            (int64) this.trPromptLen[slot], (int64) q.generatedCount(),
+            pMs, dMs);
+        this.trOpen[slot] = false;
+        this.live = this.live - 1;
         return;
+    }
+
+    /** Answer every open request with an error and stop tracking them —
+     *  an engine fault must not leave a caller waiting forever. */
+    void failAllOpen(String message) {
+        int32 i = 0;
+        while (i < this.cap) {
+            if (this.trOpen[i]) {
+                Protocol.emitError(this.out, this.trId[i], true, message);
+                this.trOpen[i] = false;
+                this.live = this.live - 1;
+            }
+            i = i + 1;
+        }
+        return;
+    }
+
+    int32 freeSlot() {
+        int32 i = 0;
+        while (i < this.cap) {
+            if (!this.trOpen[i]) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
+    }
+
+    int32 slotOfRid(int32 rid) {
+        int32 i = 0;
+        while (i < this.cap) {
+            if (this.trOpen[i] && this.trRid[i] == rid) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return -1;
     }
 
     public void onToken(int32 reqId, int32 token) {
         if (this.engine.isEog(token)) {
             return;
         }
-        if (this.firstNs == 0L) {
-            this.firstNs = Clock.nanoTime();
+        // The demux (plan 4.2.2): reqId is the SCHEDULER's id. Routing by
+        // a single "current request" would send every interleaved token
+        // to whichever caller submitted last.
+        int32 slot = this.slotOfRid(reqId);
+        if (slot < 0) {
+            return;
+        }
+        if (this.trFirstNs[slot] == 0L) {
+            this.trFirstNs[slot] = Clock.nanoTime();
         }
         int32[] one #= heap int32[1];
         one[0] = token;
         int8[] b #= this.engine.tokenizer().decode(one, 1);
         String s = heap String(#b, (int32) b.count());
-        Protocol.emitChunk(this.out, this.curId, s);
+        Protocol.emitChunk(this.out, this.trId[slot], s);
         return;
     }
 }

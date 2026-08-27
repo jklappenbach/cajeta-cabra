@@ -45,6 +45,7 @@ public class ServeToyTest {
         Assert.isTrue(cont);
         boolean end = s.handleLine("{\"op\":\"shutdown\"}");
         Assert.isFalse(end);
+        s.drive();
         s.close();
 
         int8[] all #= File.readAllBytes(path);
