@@ -1,7 +1,9 @@
 # cabra — resident-model serving harness
 
-STATUS: DRAFT — four decisions open (§3.1, §5.1, §6.1, §7.1), each with a
-recommendation. Nothing below is code yet; the plan follows approval.
+STATUS: ACTIVE — all four decisions made by Julian, 2026-08-27:
+§3.1 JSONL-stdio first (HTTP later), §5.1 continuous batching,
+§6.1 re-prefill v1, §7.1 resident until killed. Plan:
+`agents/cabra-plan.md`.
 
 ## 1. Definition
 
@@ -50,21 +52,30 @@ on top of them.
 
 ## 3. Protocol
 
-- **3.1 DECISION — wire protocol.** RECOMMENDED: HTTP/1.1 + JSON on
-  localhost, endpoints shaped OpenAI-compatible:
-  `POST /v1/chat/completions` (messages array, rendered through the
-  model's own chat template), `POST /v1/completions` (raw prompt),
-  `GET /health` (model name, ready, resident memory). Streaming via
-  SSE chunks (`stream: true`), matching the shape every existing client
-  library already speaks. ALTERNATIVE (possible first unit): JSONL over
-  stdin/stdout — one request object per line in, response/chunk objects
-  out — trivial to implement and pipe-friendly, but reaches only local
-  parent processes. NOTE: the stdlib has a full TCP stack
-  (`cajeta.io.net.Server`/`ServerBuilder`, reactor, `Headers`, URI) but
-  NO HTTP protocol layer — the HTTP option includes writing a minimal
-  HTTP/1.1 request/response handler on `TcpStream` (bounded scope:
-  content-length bodies, chunked responses for SSE, no keep-alive
-  cleverness in v1).
+- **3.1 DECIDED (Julian, 2026-08-27): JSONL over stdin/stdout.** One
+  JSON object per line in; response and chunk objects, id-tagged, per
+  line out. stdout is PROTOCOL-PURE — logs and the engine's route
+  announcements go to stderr only. HTTP comes later as a transport in
+  front of the same operation set (the stdlib has TCP but no HTTP
+  layer; that scope waits). The op set is transport-neutral by
+  construction so the HTTP unit adds a listener, not a rewrite.
+- **3.1.1 Requests** (stdin, one object per line; `id` is the caller's
+  correlation key, echoed on every output line for that request):
+  - `{"op":"generate","id":1,"prompt":"...", ...}` — raw completion,
+    no template.
+  - `{"op":"chat","id":2,"messages":[{"role":"user","content":"..."}],
+    ...}` — rendered through the model's own chat template.
+  - `{"op":"health","id":3}` — state before/during/after load.
+  - `{"op":"shutdown"}` — drain and exit 0. EOF on stdin means the
+    same.
+- **3.1.2 Responses** (stdout, one object per line):
+  - stream chunks: `{"id":1,"chunk":"text"}` — one per decoded span,
+    EOG tokens never present (§4.2).
+  - completion: `{"id":1,"done":true,"finish":"eos","usage":
+    {"prompt_tokens":N,"gen_tokens":M,"prefill_ms":X,"decode_ms":Y}}`.
+  - health: `{"id":3,"state":"loading"|"ready","model":"<path>"}`.
+  - errors: `{"id":1,"error":"<message>"}` — a malformed line answers
+    with `"id":null` and never kills the server.
 - **3.2** Requests carry sampling parameters (temperature, top-k, top-p,
   repeat penalty, seed, max tokens, stop strings); absent fields take
   the model-appropriate defaults. A `temp: 0` request is deterministic.
@@ -85,14 +96,14 @@ on top of them.
 
 ## 5. Sessions and concurrency
 
-- **5.1 DECISION — concurrency model.** RECOMMENDED: N concurrent
-  in-flight requests, mapped onto the engine scheduler's continuous
-  batching (`--max-seqs`, engine Units 8–11 — built for exactly this
-  and never yet driven by a real multi-client caller). Conversation
-  STATE stays client-side, as the OpenAI shape implies: each request
-  carries its full messages array. ALTERNATIVE: strictly serial v1
-  (one request at a time, others queue) — simpler to reason about,
-  and continuous batching arrives as a v2 line item.
+- **5.1 DECIDED (Julian): continuous batching**, sequenced. Target: N concurrent
+  in-flight requests multiplexed over the one stdio pipe by `id`,
+  mapped onto the engine scheduler's continuous batching (`--max-seqs`,
+  engine Units 8–11 — built for exactly this and never yet driven by a
+  real multi-client caller). The plan reaches it in two steps: the
+  serial loop first (one request in flight, correctness and protocol
+  pinned), then id-multiplexed batching as its own unit. Conversation
+  STATE stays client-side: each request carries its full context.
 - **5.2** A request beyond capacity queues rather than erroring; a
   configured queue depth bounds it, and beyond that the server sheds
   with an explicit "busy" response (`cajeta.io.net.ConnectionLimiter`
@@ -100,7 +111,7 @@ on top of them.
 
 ## 6. Prompt cache
 
-- **6.1 DECISION — KV reuse across turns.** RECOMMENDED for v1:
+- **6.1 DECIDED (Julian): re-prefill v1.** For the record:
   re-prefill each request (correct, simple — and prefill is now 15.4
   ms/token batched, so a 2k-token conversation re-prefills in ~30 s on
   the 72B... which is exactly why this decision matters at v1.5).
@@ -111,7 +122,7 @@ on top of them.
 
 ## 7. Lifecycle
 
-- **7.1 DECISION — residency policy.** RECOMMENDED v1: resident until
+- **7.1 DECIDED (Julian): resident until killed.** v1: resident until
   killed — `cabra serve --model <path>` loads, warms, listens, and only
   a signal ends it. ALTERNATIVE (ollama-style): idle unload after a
   keep-alive window and lazy reload on the next request — real memory
@@ -119,7 +130,7 @@ on top of them.
   policy belongs with olla-installed daemon UX, not the dev harness.
 - **7.2** Startup performs the engine's load-time warmup (already
   engine behavior) so the first request pays no first-touch cliff.
-- **7.3** `GET /health` (or the JSONL `{"op":"health"}`) answers before
+- **7.3** `{"op":"health"}` answers before
   and during load with a state field, so drivers can poll readiness.
 
 ## 8. Observability
