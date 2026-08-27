@@ -1,0 +1,138 @@
+package dev.cajeta.cabra;
+
+import cajeta.codec.json.JsonLinesWriter;
+import cajeta.lang.String;
+import cajeta.lang.System;
+import cajeta.time.Clock;
+import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.llm.gen.SampleParams;
+import dev.cajeta.llm.gen.TokenSink;
+import dev.cajeta.llm.sched.Request;
+
+/**
+ * The serial serve loop (plan 2.2.3): one request in flight, driven to
+ * completion, streamed as it decodes. Implements the engine's
+ * `TokenSink` so every generated token becomes a chunk line the moment
+ * it lands — EOG ids filtered through `engine.isEog` (spec §4.2), so a
+ * stop token never reaches the wire.
+ *
+ * Owns the engine and the protocol writer; the caller (Main, or a
+ * test) feeds it lines. Returns false from `handleLine` when the
+ * session should end (`shutdown`); EOF is the caller noticing stdin
+ * closed, and means the same.
+ *
+ * Timing for the usage block is measured HERE, not in the engine:
+ * prefill_ms is submit-to-first-token, decode_ms first-token-to-done —
+ * the same split every serving stack reports, needing no engine hooks.
+ */
+public final class Serve implements TokenSink {
+
+    LlmEngine engine;          // owned
+    JsonLinesWriter out;       // owned
+    String modelPath;
+    int32 runBound;            // scheduler step bound per request
+
+    // Per-request streaming state (serial: one in flight).
+    int64 curId;
+    int64 t0Ns;
+    int64 firstNs;
+
+    public Serve(#LlmEngine engine, #JsonLinesWriter out,
+            String modelPath, int32 runBound) {
+        this.engine #= engine;
+        this.out #= out;
+        this.modelPath = modelPath;
+        this.runBound = runBound;
+        this.curId = 0L;
+        this.t0Ns = 0L;
+        this.firstNs = 0L;
+        this.engine.setSink(this);
+    }
+
+    public LlmEngine engineRef() {
+        return this.engine;
+    }
+
+    /** One protocol line. Returns false when the loop should end. */
+    public boolean handleLine(String line) {
+        Req r #= Protocol.parseLine(line);
+        if (!r.ok) {
+            Protocol.emitError(this.out, r.id, r.hasId, r.err);
+            return true;
+        }
+        if (r.op.equals("shutdown")) {
+            return false;
+        }
+        if (r.op.equals("health")) {
+            // Reached only with a loaded engine — Main answers `loading`
+            // itself before construction (plan 3.1.3 refines this).
+            Protocol.emitHealth(this.out, r.id, "ready", this.modelPath);
+            return true;
+        }
+        if (r.op.equals("chat")) {
+            Protocol.emitError(this.out, r.id, r.hasId,
+                "chat lands in plan unit 3 - use generate");
+            return true;
+        }
+        if (!r.hasId) {
+            // Streaming without a correlation key is unanswerable.
+            Protocol.emitError(this.out, 0L, false,
+                "generate needs an id");
+            return true;
+        }
+        this.generate(r);
+        return true;
+    }
+
+    void generate(Req r) {
+        int32[] ids #= this.engine.tokenizer().encodePrompt(r.prompt);
+        SampleParams p = heap SampleParams(r.temp, r.seed);
+        p.topK = r.topK;
+        p.topP = r.topP;
+        p.repeatPenalty = r.repeatPenalty;
+        // stopTokens stays null: the engine fills the model's EOG set.
+
+        this.curId = r.id;
+        this.firstNs = 0L;
+        this.t0Ns = Clock.nanoTime();
+        int32 rid = this.engine.submitTokens(ids, (int32) ids.count(),
+            r.n, #p);
+        this.engine.runAll(this.runBound);
+        int64 endNs = Clock.nanoTime();
+
+        Request q = this.engine.request(rid);
+        String finish = "budget";
+        if (q.finishReason() == Request.FINISH_EOS) {
+            finish = "eos";
+        }
+        if (q.finishReason() == Request.FINISH_STOP) {
+            finish = "stop";
+        }
+        int64 pMs = 0L;
+        int64 dMs = 0L;
+        if (this.firstNs > 0L) {
+            pMs = (this.firstNs - this.t0Ns) / 1000000L;
+            dMs = (endNs - this.firstNs) / 1000000L;
+        } else {
+            pMs = (endNs - this.t0Ns) / 1000000L;
+        }
+        Protocol.emitDone(this.out, r.id, finish, (int64) ids.count(),
+            (int64) q.generatedCount(), pMs, dMs);
+        return;
+    }
+
+    public void onToken(int32 reqId, int32 token) {
+        if (this.engine.isEog(token)) {
+            return;
+        }
+        if (this.firstNs == 0L) {
+            this.firstNs = Clock.nanoTime();
+        }
+        int32[] one #= heap int32[1];
+        one[0] = token;
+        int8[] b #= this.engine.tokenizer().decode(one, 1);
+        String s = heap String(#b, (int32) b.count());
+        Protocol.emitChunk(this.out, this.curId, s);
+        return;
+    }
+}

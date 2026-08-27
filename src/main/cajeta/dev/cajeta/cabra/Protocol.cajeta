@@ -1,0 +1,168 @@
+package dev.cajeta.cabra;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonLinesWriter;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.lang.String;
+
+/**
+ * The JSONL wire protocol (spec §3.1.1/§3.1.2): parse one request line,
+ * emit one response object per line. Emission goes through the stdlib
+ * `JsonLinesWriter` so escaping is the codec's, not ours; parsing goes
+ * through `Json.parse`, and ProtocolTest pins that escapes arrive
+ * DECODED (the harness-side confusion that once cost six cajeta-llm
+ * tests must stay impossible here).
+ *
+ * Parsing never throws for bad input — the serve loop's liveness
+ * depends on it — so every failure path lands in `Req.ok=false` with a
+ * message the caller can ship back as an error object.
+ */
+public final class Protocol {
+
+    /** Parse one request line into an owned Req. */
+    public static #Req parseLine(String line) {
+        Req r = heap Req();
+        JsonValue v = null;
+        try {
+            v #= Json.parse(line);
+        } catch (Throwable t) {
+            r.err = "malformed json: " + t.getMessage();
+            return #r;
+        }
+        if (v.kind() != JsonValue.OBJECT) {
+            r.err = "request must be a json object";
+            return #r;
+        }
+        JsonObject o = v.object();
+
+        JsonValue idv = o.get("id");
+        if (idv != null && idv.kind() == JsonValue.NUMBER) {
+            r.hasId = true;
+            r.id = idv.asInt64();
+        }
+
+        JsonValue opv = o.get("op");
+        if (opv == null || opv.kind() != JsonValue.STRING) {
+            r.err = "missing op";
+            return #r;
+        }
+        String op #= opv.asString();
+        r.op = op;
+
+        if (op.equals("health") || op.equals("shutdown")) {
+            r.ok = true;
+            return #r;
+        }
+        if (op.equals("generate")) {
+            JsonValue pv = o.get("prompt");
+            if (pv == null || pv.kind() != JsonValue.STRING) {
+                r.err = "generate needs a string prompt";
+                return #r;
+            }
+            String p #= pv.asString();
+            r.prompt = p;
+        } else if (op.equals("chat")) {
+            JsonValue mv = o.get("messages");
+            if (mv == null || mv.kind() != JsonValue.ARRAY) {
+                r.err = "chat needs a messages array";
+                return #r;
+            }
+            int8[] mb #= Json.toBytes(mv);
+            String ms = heap String(#mb, (int32) mb.count());
+            r.messagesRaw = ms;
+        } else {
+            r.err = "unknown op \"" + op + "\"";
+            return #r;
+        }
+
+        Protocol.readSampling(o, r);
+        r.ok = true;
+        return #r;
+    }
+
+    static void readSampling(JsonObject o, Req r) {
+        JsonValue nv = o.get("n");
+        if (nv != null && nv.kind() == JsonValue.NUMBER) {
+            r.n = nv.asInt32();
+        }
+        JsonValue tv = o.get("temp");
+        if (tv != null && tv.kind() == JsonValue.NUMBER) {
+            r.temp = (float32) tv.asFloat64();
+        }
+        JsonValue kv = o.get("top_k");
+        if (kv != null && kv.kind() == JsonValue.NUMBER) {
+            r.topK = kv.asInt32();
+        }
+        JsonValue pv = o.get("top_p");
+        if (pv != null && pv.kind() == JsonValue.NUMBER) {
+            r.topP = (float32) pv.asFloat64();
+        }
+        JsonValue rv = o.get("repeat_penalty");
+        if (rv != null && rv.kind() == JsonValue.NUMBER) {
+            r.repeatPenalty = (float32) rv.asFloat64();
+        }
+        JsonValue sv = o.get("seed");
+        if (sv != null && sv.kind() == JsonValue.NUMBER) {
+            r.seed = sv.asInt64();
+        }
+        return;
+    }
+
+    // ── responses (spec §3.1.2) ─────────────────────────────────────────
+
+    public static void emitChunk(JsonLinesWriter out, int64 id,
+            String text) {
+        out.beginObject()
+            .key("id").writeNumber(id)
+            .key("chunk").writeString(text)
+            .endObject().endLine();
+        out.flush();
+        return;
+    }
+
+    public static void emitDone(JsonLinesWriter out, int64 id,
+            String finish, int64 promptTokens, int64 genTokens,
+            int64 prefillMs, int64 decodeMs) {
+        out.beginObject()
+            .key("id").writeNumber(id)
+            .key("done").writeBoolean(true)
+            .key("finish").writeString(finish)
+            .key("usage").beginObject()
+                .key("prompt_tokens").writeNumber(promptTokens)
+                .key("gen_tokens").writeNumber(genTokens)
+                .key("prefill_ms").writeNumber(prefillMs)
+                .key("decode_ms").writeNumber(decodeMs)
+            .endObject()
+            .endObject().endLine();
+        out.flush();
+        return;
+    }
+
+    public static void emitHealth(JsonLinesWriter out, int64 id,
+            String state, String model) {
+        out.beginObject()
+            .key("id").writeNumber(id)
+            .key("state").writeString(state)
+            .key("model").writeString(model)
+            .endObject().endLine();
+        out.flush();
+        return;
+    }
+
+    /** `hasId == false` emits `"id":null` — the malformed-line answer,
+     *  where no correlation key ever parsed. */
+    public static void emitError(JsonLinesWriter out, int64 id,
+            boolean hasId, String message) {
+        out.beginObject().key("id");
+        if (hasId) {
+            out.writeNumber(id);
+        } else {
+            out.writeNull();
+        }
+        out.key("error").writeString(message)
+            .endObject().endLine();
+        out.flush();
+        return;
+    }
+}

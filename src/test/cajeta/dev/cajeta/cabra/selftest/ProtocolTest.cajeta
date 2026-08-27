@@ -1,0 +1,149 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonLinesWriter;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.io.file.File;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.Protocol;
+import dev.cajeta.cabra.Req;
+
+/**
+ * Plan 2.1.1 / 2.1.2 — the JSONL protocol, both directions, with the
+ * negative halves that keep a serving loop alive: a malformed line
+ * must produce an error object and NEVER a throw, and every emitted
+ * line must parse back through the same codec — asserted by parsing,
+ * not by string comparison, so formatting is free to change.
+ */
+public class ProtocolTest {
+
+    public ProtocolTest() { return; }
+
+    // ── 2.1.1 requests ─────────────────────────────────────────────────
+
+    @Test
+    public void generateRequestParsesWithDefaults() {
+        Req r #= Protocol.parseLine(
+            "{\"op\":\"generate\",\"id\":7,\"prompt\":\"hello\"}");
+        Assert.isTrue(r.ok);
+        Assert.equals("generate", r.op);
+        Assert.isTrue(r.hasId);
+        Assert.equals(7L, r.id);
+        Assert.equals("hello", r.prompt);
+        // Absent sampling fields take the documented defaults.
+        Assert.equals(256, r.n);
+        Assert.isTrue(r.temp == 0.0f);
+    }
+
+    /** JSON string escapes must arrive DECODED — a prompt with \\n is a
+     *  prompt with a newline, not two characters. (The v0.21.1 compiler
+     *  fixed Json.parse escape decode; this pins that cabra actually
+     *  gets it, because six cajeta-llm tests once read engine bugs out
+     *  of exactly this harness-side confusion.) */
+    @Test
+    public void promptEscapesArriveDecoded() {
+        Req r #= Protocol.parseLine(
+            "{\"op\":\"generate\",\"id\":1,\"prompt\":\"a\\nb\\\"c\"}");
+        Assert.isTrue(r.ok);
+        Assert.equals(5, r.prompt.byteLength());
+        int8[] b #= r.prompt.toBytes();
+        Assert.equals(10, (int32) b[1]);   // real newline
+        Assert.equals(34, (int32) b[3]);   // real quote
+    }
+
+    @Test
+    public void samplingFieldsOverrideDefaults() {
+        Req r #= Protocol.parseLine("{\"op\":\"generate\",\"id\":2,"
+            + "\"prompt\":\"x\",\"n\":8,\"temp\":0.7,\"top_k\":40,"
+            + "\"top_p\":0.9,\"repeat_penalty\":1.1,\"seed\":42}");
+        Assert.isTrue(r.ok);
+        Assert.equals(8, r.n);
+        Assert.isTrue(r.temp > 0.69f && r.temp < 0.71f);
+        Assert.equals(40, r.topK);
+        Assert.isTrue(r.topP > 0.89f && r.topP < 0.91f);
+        Assert.isTrue(r.repeatPenalty > 1.09f);
+        Assert.equals(42L, r.seed);
+    }
+
+    /** The negative half: malformed input yields an error Req — never a
+     *  throw (the loop must survive), never a half-parsed request. */
+    @Test
+    public void malformedLinesYieldErrorsNotThrows() {
+        Req a #= Protocol.parseLine("this is not json");
+        Assert.isFalse(a.ok);
+        Assert.isFalse(a.err.equals(""));
+        Req b #= Protocol.parseLine("{\"id\":3,\"prompt\":\"x\"}");
+        Assert.isFalse(b.ok);              // op missing
+        Req c #= Protocol.parseLine(
+            "{\"op\":\"generate\",\"id\":4}");
+        Assert.isFalse(c.ok);              // prompt missing
+        Req d #= Protocol.parseLine("{\"op\":\"warp\",\"id\":5}");
+        Assert.isFalse(d.ok);              // unknown op NAMES itself
+        Assert.isTrue(d.err.contains("warp"));
+    }
+
+    // ── 2.1.2 responses ────────────────────────────────────────────────
+
+    /** Emit every response shape to a real file through the real
+     *  writer, read it back, and parse each line with the codec. */
+    @Test
+    public void emittedLinesParseBackThroughTheCodec() {
+        String path = "tmp/protocol-test.jsonl";
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        JsonLinesWriter out = heap JsonLinesWriter(fw);
+        Protocol.emitChunk(out, 7L, "hel\"lo\nworld");
+        Protocol.emitDone(out, 7L, "eos", 12L, 34L, 150L, 900L);
+        Protocol.emitHealth(out, 3L, "ready", "/models/x.gguf");
+        Protocol.emitError(out, 9L, true, "bad thing \"quoted\"");
+        Protocol.emitError(out, 0L, false, "no id on this one");
+        out.flush();
+        fw.close();
+
+        int8[] all #= File.readAllBytes(path);
+        String text = heap String(#all, (int32) all.count());
+        // Split on newlines; each line must parse.
+        int32 nLines = 0;
+        int32 start = 0;
+        int32 i = 0;
+        int8[] tb #= text.toBytes();
+        while (i <= (int32) tb.count()) {
+            boolean atEnd = i == (int32) tb.count();
+            if (atEnd || tb[i] == (int8) 10) {
+                if (i > start) {
+                    String line #= text.substring(start, i);
+                    JsonValue v #= Json.parse(line);
+                    Assert.equals(JsonValue.OBJECT, v.kind());
+                    nLines = nLines + 1;
+                    if (nLines == 1) {
+                        JsonObject o = v.object();
+                        Assert.equals(7L, o.get("id").asInt64());
+                        String ch #= o.get("chunk").asString();
+                        Assert.equals("hel\"lo\nworld", ch);
+                    }
+                    if (nLines == 2) {
+                        JsonObject o = v.object();
+                        Assert.isTrue(o.get("done").asBoolean());
+                        String fin #= o.get("finish").asString();
+                        Assert.equals("eos", fin);
+                        JsonObject u = o.get("usage").object();
+                        Assert.equals(12L,
+                            u.get("prompt_tokens").asInt64());
+                        Assert.equals(34L, u.get("gen_tokens").asInt64());
+                    }
+                    if (nLines == 5) {
+                        JsonObject o = v.object();
+                        Assert.isTrue(o.get("id").isNull());
+                    }
+                }
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+        Assert.equals(5, nLines);
+    }
+}

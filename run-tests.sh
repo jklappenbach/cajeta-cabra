@@ -86,11 +86,20 @@ else
 fi
 echo ">> engine: $llm_cja"
 
+# cabra's own library .cja first — the engine-repo pattern: a test
+# build over TWO source roots left the second root's types unresolved
+# (2026-08-27), so main sources become an archive and the tests compile
+# against it.
+echo ">> building cabra library .cja"
+"$CAJETA" --emit=cja -o "$out/cabra.cja" \
+    --classpath="$llm_cja,$codec_cja,$jinja_cja" \
+    dev.cajeta.cabra.Main.main "$here/src/main/cajeta" "$out" >/dev/null
+
 echo ">> building + running the cabra test binary"
 "$CAJETA" --emit=exe --profile=test --xpu-backend="$XPU_BACKEND" \
-    --classpath="$llm_cja,$unit_cja,$codec_cja,$jinja_cja" \
+    --classpath="$out/cabra.cja,$llm_cja,$unit_cja,$codec_cja,$jinja_cja" \
     -o "$out/cabratests" \
     dev.cajeta.cabra.selftest.TestMain.run \
-    "$here/src/test/cajeta" "$here/src/main/cajeta" >/dev/null
+    "$here/src/test/cajeta" "$out" >/dev/null
 
 ( cd "$here" && "$out/cabratests" )

@@ -1,0 +1,95 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonLinesWriter;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.io.file.File;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.Serve;
+import dev.cajeta.llm.EngineOptions;
+import dev.cajeta.llm.LlmEngine;
+
+/**
+ * Plan 2.1.3 — the serve loop end to end over the TOY model
+ * (cajeta-llm's fixture through the sibling path): real engine load,
+ * real generation, the protocol read back and PARSED, and the usage
+ * block's counts cross-checked against the chunk stream — a done line
+ * whose numbers merely exist could paper over a sink that dropped
+ * half the tokens.
+ */
+public class ServeToyTest {
+
+    static final String TOY =
+        "../cajeta-llm/src/test/fixtures/gguf/toy.gguf";
+
+    public ServeToyTest() { return; }
+
+    @Test
+    public void generateStreamsChunksThenBudgetDone() {
+        EngineOptions opts = heap EngineOptions(ServeToyTest.TOY);
+        opts.ctx = 64;
+        opts.maxSeqs = 1;
+        LlmEngine e #= LlmEngine.load(#opts);
+
+        String path = "tmp/serve-toy-test.jsonl";
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        JsonLinesWriter out = heap JsonLinesWriter(fw);
+        Serve s = heap Serve(#e, #out, ServeToyTest.TOY, 256);
+
+        boolean cont = s.handleLine("{\"op\":\"generate\",\"id\":11,"
+            + "\"prompt\":\"hello\",\"n\":4,\"temp\":0}");
+        Assert.isTrue(cont);
+        boolean end = s.handleLine("{\"op\":\"shutdown\"}");
+        Assert.isFalse(end);
+        fw.close();
+
+        int8[] all #= File.readAllBytes(path);
+        String text = heap String(#all, (int32) all.count());
+        int8[] tb #= text.toBytes();
+        int32 chunks = 0;
+        int64 genTokens = 0L;
+        boolean sawDone = false;
+        int32 start = 0;
+        int32 i = 0;
+        while (i <= (int32) tb.count()) {
+            boolean atEnd = i == (int32) tb.count();
+            if (atEnd || tb[i] == (int8) 10) {
+                if (i > start) {
+                    String line #= text.substring(start, i);
+                    JsonValue v #= Json.parse(line);
+                    Assert.equals(JsonValue.OBJECT, v.kind());
+                    JsonObject o = v.object();
+                    Assert.equals(11L, o.get("id").asInt64());
+                    if (o.containsKey("chunk")) {
+                        Assert.isFalse(sawDone);   // done is LAST
+                        chunks = chunks + 1;
+                    } else if (o.containsKey("done")) {
+                        sawDone = true;
+                        String fin #= o.get("finish").asString();
+                        Assert.equals("budget", fin);
+                        JsonObject u = o.get("usage").object();
+                        Assert.isTrue(
+                            u.get("prompt_tokens").asInt64() > 0L);
+                        genTokens = u.get("gen_tokens").asInt64();
+                        Assert.equals(4L, genTokens);
+                    } else {
+                        Assert.fail("unexpected line: " + line);
+                    }
+                }
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+        Assert.isTrue(sawDone);
+        Assert.isTrue(chunks >= 1);
+        // Every generated token that is not an EOG id must have reached
+        // the wire; the toy model's output contains no EOG ids, so the
+        // chunk count IS the generated count.
+        Assert.equals(genTokens, (int64) chunks);
+    }
+}

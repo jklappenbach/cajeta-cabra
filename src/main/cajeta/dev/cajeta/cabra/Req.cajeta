@@ -1,0 +1,52 @@
+package dev.cajeta.cabra;
+
+import cajeta.lang.String;
+
+/**
+ * One parsed protocol request (spec §3.1.1). Every string field is an
+ * OWNED copy — nothing borrows into the parsed JsonValue, so a Req
+ * outlives the line it came from (the returned-object-owning-arrays
+ * rule: fields stored with `#=`, values moved in).
+ *
+ * `ok == false` means the line did not yield a runnable request; `err`
+ * says why, and the serve loop answers with an error object and
+ * CONTINUES — a malformed line must never kill the server.
+ */
+public final class Req {
+
+    public boolean ok;
+    public String err;
+
+    public String op;
+    public boolean hasId;
+    public int64 id;
+
+    public String prompt;      // generate
+    public String messagesRaw; // chat: the messages array re-serialized
+
+    // Sampling (spec §3.2) — defaults documented here and pinned by
+    // ProtocolTest: n=256, temp=0 (deterministic), top_k=40, top_p=0.95,
+    // repeat_penalty=1.0, seed=0.
+    public int32 n;
+    public float32 temp;
+    public int32 topK;
+    public float32 topP;
+    public float32 repeatPenalty;
+    public int64 seed;
+
+    public Req() {
+        this.ok = false;
+        this.err = "";
+        this.op = "";
+        this.hasId = false;
+        this.id = 0L;
+        this.prompt = "";
+        this.messagesRaw = "";
+        this.n = 256;
+        this.temp = 0.0f;
+        this.topK = 40;
+        this.topP = 0.95f;
+        this.repeatPenalty = 1.0f;
+        this.seed = 0L;
+    }
+}

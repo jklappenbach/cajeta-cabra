@@ -27,10 +27,17 @@ LLM_SRC="${LLM_SRC:-$here/../cajeta-llm/src/main/cajeta}"
 
 mkdir -p "$here/tmp"
 LOG="$here/tmp/bld-$(basename "$OUT").log"
-"$CAJETA" --emit=exe --release --xpu-backend="$BE" \
+# TWO STEPS, not one: a build over two source roots leaves the second
+# root's types unresolved from the first (hit twice on 2026-08-27, in
+# the test build and here), so the engine becomes an archive first and
+# cabra compiles against it.
+"$CAJETA" --emit=cja -o "$here/tmp/llm-$BE.cja" \
     --classpath="$CODEC,$JINJA" \
+    dev.cajeta.llm.Llm.run "$LLM_SRC" "$here/tmp" > "$LOG" 2>&1
+"$CAJETA" --emit=exe --release --xpu-backend="$BE" \
+    --classpath="$here/tmp/llm-$BE.cja,$CODEC,$JINJA" \
     -o "$OUT" dev.cajeta.cabra.Main.main \
-    "$here/src/main/cajeta" "$LLM_SRC" > "$LOG" 2>&1
+    "$here/src/main/cajeta" "$here/tmp" >> "$LOG" 2>&1
 rc=$?
 bad=$(grep -oE "CAJETA_ERROR_[A-Z_]+|SIGSEGV|error:" "$LOG" | grep -v FRESH_RETURN | sort -u | head -5 || true)
 if [ $rc -ne 0 ] || [ ! -x "$OUT" ] || [ -n "$bad" ]; then

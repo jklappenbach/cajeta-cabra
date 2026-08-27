@@ -49,35 +49,52 @@ checkout in dev / olla pin in release; `dev.cajeta.codec` (JSON);
 ## 2. Protocol core — parse, dispatch, answer (serial)
 
 ### 2.1 TDD
-- [ ] 2.1.1 Line parser: a well-formed `generate` request parses to op,
+- [x] 2.1.1 Line parser: a well-formed `generate` request parses to op,
       id, prompt, sampling fields; absent fields take defaults; a
       malformed line yields an error object with `"id":null` and the
       loop CONTINUES (the negative half: the server must not die).
-- [ ] 2.1.2 Response encoder: chunk, done (finish + usage), health, and
+- [x] 2.1.2 Response encoder: chunk, done (finish + usage), health, and
       error objects each serialize to one line of valid JSON — asserted
       by parsing them back with the codec, not by string comparison.
-- [ ] 2.1.3 End-to-end over the TOY model (cajeta-llm's
+- [x] 2.1.3 End-to-end over the TOY model (cajeta-llm's
       `src/test/fixtures/gguf/toy.gguf` via the sibling path): a
       `generate` with `"n":4` yields ≥1 chunk line, then a done line
       with `finish:"budget"` and a usage block whose token counts match
       the chunk stream.
 
 ### 2.2 Coding
-- [ ] 2.2.1 `Main.main` — arg parse (`serve --model --ctx --max-seqs
+- [x] 2.2.1 `Main.main` — arg parse (`serve --model --ctx --max-seqs
       --device`), engine load, serve loop.
-- [ ] 2.2.2 `Protocol` — request parse (codec JSON) + response emit;
+- [x] 2.2.2 `Protocol` — request parse (codec JSON) + response emit;
       stdout write is line-atomic; flush per line.
-- [ ] 2.2.3 `Serve` — the serial loop: read line, dispatch op, drive
+- [x] 2.2.3 `Serve` — the serial loop: read line, dispatch op, drive
       the engine (`submitTokens`/`submitText` + `runAll`), stream via a
       `TokenSink` that emits chunk lines (EOG ids filtered through
       `engine.isEog` — spec 4.2), answer done with finish + usage.
-- [ ] 2.2.4 stderr discipline: every diagnostic through a logger that
+- [x] 2.2.4 stderr discipline: every diagnostic through a logger that
       writes fd 2; nothing but protocol objects on fd 1 (the engine's
       own route prints already go to stdout — REDIRECT or accept them
       on stderr via engine option; resolve which and record it here).
 
+#### Unit 2 notes (2026-08-27)
+- 2.2.4 resolved by fixing the ENGINE: batch-route / kernel-avail /
+  prefill announcements moved to stderr (llm main, "serve-path
+  diagnostics to stderr").
+- The protocol round-trip test found a STDLIB defect: JsonWriter passed
+  control characters through raw — invalid JSON that splits JSONL
+  framing. Fixed in the compiler repo (bc825d85) with its own
+  round-trip test; the first piped run promptly streamed a `\u0004`
+  chunk through the fix.
+- COMPILER GAP observed twice and routed around, not fixed: a build
+  over TWO source roots leaves the second root's types unresolved from
+  the first. Both run-tests.sh and scripts/bld.sh now build the engine
+  as a .cja first (the engine repo's own pattern). Worth a compiler
+  repro + fix later.
+- Suite 10/0/1; pipe acceptance: 6/6 stdout lines machine-parse, logs
+  on stderr, exit 0.
+
 ### 2.3 Acceptance
-- [ ] 2.3.1 `printf '...generate...' | cabra serve --model toy.gguf`
+- [x] 2.3.1 `printf '...generate...' | cabra serve --model toy.gguf`
       emits exactly parseable JSONL on stdout and exits 0 on EOF.
 
 ## 3. Chat op, finish reasons, health, shutdown
