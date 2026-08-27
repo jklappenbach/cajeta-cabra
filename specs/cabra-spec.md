@@ -27,6 +27,10 @@ through that API is an engine API gap, and it is discovered here first.
 **Non-goals (v1).** Model download and install (olla's), multi-model
 serving, remote/authenticated access (localhost only; no TLS), the
 vision tower, sampling research. Each may become a later spec section.
+On-the-fly learning (directed 2026-08-26) is a spec of its own spanning
+cabra and the engine — cabra's protocol and lifecycle sections here are
+written knowing learning endpoints and adapter/memory state will land
+on top of them.
 
 ## 2. Use cases
 
