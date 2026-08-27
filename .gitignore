@@ -1,3 +1,14 @@
 tmp/
 build/
 .cajeta/
+
+# Build artifacts written INTO the source tree. These are not hypothetical:
+# 180 of them (24 MB) were committed in unit 1's scaffold, because a compile
+# that is handed two source roots binds the second one to the OUTPUT
+# DIRECTORY and drops object files into it — silently, at exit 0. That is a
+# compiler defect (fixed in cajeta c963d19b, which now rejects the arity),
+# but the ignore stays: nothing generated belongs in src/.
+*.o
+*.obj
+*.cja
+src/main/cajeta/*.c
