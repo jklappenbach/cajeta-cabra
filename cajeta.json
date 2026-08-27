@@ -1,0 +1,75 @@
+{
+    // cabra — the resident-model serving harness for the cajeta LLM
+    // stack. A cabra is a goat; a harness is what you put on one.
+    //
+    // Keeps a model loaded (the 72B takes ~35 s to load — paying that
+    // once, not per prompt, is the point), receives prompts, streams
+    // responses, and terminates each response on the model's
+    // end-of-generation set (LlmEngine.eogTokens, engine 2e7c1c7).
+    //
+    // An APPLICATION project — the ecosystem's first: `entry-method` is
+    // declared, the build emits an executable. It is deliberately a
+    // SEPARATE project from cajeta-llm (Julian, 2026-08-26) and consumes
+    // ONLY the engine's public API, which makes it the first real
+    // embedder — anything cabra cannot do through that API is an engine
+    // API gap, found here first. Boundaries in the reference ecosystem:
+    // llama.cpp : llama-server : ollama ≈ dev.cajeta.llm : cabra : olla
+    // (ollama's distribution half is olla's mandate; cabra is serving).
+    //
+    // VERSIONING — `details.version` is the single source of truth.
+
+    "details": {
+        "name":               "dev.cajeta.cabra",
+        "version":            "0.1.0",
+        "description":        "cabra — resident-model LLM serving harness: load once, prompt many, stream responses, stop on the model's EOG set",
+        "license":            "Apache-2.0",
+        "authors":            ["Julian Klappenbach"],
+        "cajeta-lang-version": "1.0"
+    },
+
+    "settings": {
+        // The engine mmaps checkpoints; the server listens on localhost.
+        "capabilities": ["filesystem", "network"],
+
+        // dev.cajeta.llm is the engine (LlmEngine, Scheduler, TokenSink,
+        // eogTokens). Dev builds resolve it from the sibling checkout
+        // like cajeta-llm's own run-tests.sh resolves codec/jinja; the
+        // pin below is for release resolution through olla.
+        "dependencies": {
+            "dev.cajeta.llm": "0.1.0"
+        },
+
+        "dev-dependencies": {
+            "dev.cajeta.unit": "0.2.2"
+        },
+
+        "repositories": [
+            { "name": "central", "url": "https://olla.cajeta.dev",
+              "priority": 0 }
+        ],
+
+        "build": {
+            "source-root": "src/main/cajeta",
+            "entry-method": "dev.cajeta.cabra.Main.main",
+            "target": "host"
+        }
+    },
+
+    "tasks": {
+
+        "build": {
+            "description": "Compile the cabra executable",
+            "actions": [
+                { "action": "build", "flavor": "release", "id": "art" }
+            ],
+            "outputs": { "path": "${art.path}", "sha256": "${art.sha256}" }
+        },
+
+        "test": {
+            "description": "Build + run the test suite",
+            "actions": [
+                { "action": "exec", "command": "./run-tests.sh" }
+            ]
+        }
+    }
+}
