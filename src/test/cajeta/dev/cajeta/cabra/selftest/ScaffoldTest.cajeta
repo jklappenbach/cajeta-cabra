@@ -1,0 +1,27 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.llm.io.Quant;
+
+/**
+ * Plan 1.1.1 — the scaffold proof: this test compiles against the
+ * ENGINE (a dev.cajeta.llm symbol resolved through the sibling-checkout
+ * .cja with codec/jinja transitively) and runs green under cajeta-unit.
+ * It asserts a real engine fact rather than `true`, so a classpath that
+ * silently resolved the wrong archive would still have to produce a
+ * working Quant to pass.
+ */
+public class ScaffoldTest {
+
+    public ScaffoldTest() { return; }
+
+    @Test
+    public void engineResolvesThroughTheSiblingClasspath() {
+        // Q4_K: 256 elements in 144 bytes — the engine's own constants.
+        Assert.equals(256, Quant.blockElems(Quant.GG_Q4_K));
+        Assert.equals(144, Quant.blockBytes(Quant.GG_Q4_K));
+        Assert.isTrue(Quant.supported(Quant.GG_Q5_0));
+    }
+}

@@ -22,21 +22,28 @@ checkout in dev / olla pin in release; `dev.cajeta.codec` (JSON);
 ## 1. Build + test scaffolding
 
 ### 1.1 TDD
-- [ ] 1.1.1 A trivial `@Test` in `dev.cajeta.cabra.selftest` runs green
+- [x] 1.1.1 A trivial `@Test` in `dev.cajeta.cabra.selftest` runs green
       through `./run-tests.sh` (proves the harness resolves cajeta-unit
       and the sibling engine .cja with codec/jinja transitively).
 
 ### 1.2 Coding
-- [ ] 1.2.1 `run-tests.sh` modeled on cajeta-llm's: resolve
+- [x] 1.2.1 `run-tests.sh` modeled on cajeta-llm's: resolve
       dev.cajeta.llm from the sibling checkout (build its .cja if
       stale), codec/jinja/unit as cajeta-llm's script already does.
-- [ ] 1.2.2 `tmp/bld.sh <backend> <out>` building the executable from
+- [x] 1.2.2 `scripts/bld.sh <backend> <out>` (DEVIATION from the
+      original `tmp/bld.sh` wording: tmp/ is gitignored and this is
+      project infrastructure, so it is versioned) building the
+      executable from
       `dev.cajeta.cabra.Main.main` with the engine on the classpath —
       the same gate discipline (exit code AND binary AND
       CAJETA_ERROR grep; watch `kernels skipped`).
 
 ### 1.3 Acceptance
-- [ ] 1.3.1 Both scripts run clean from a fresh checkout beside
+<!-- 2026-08-27: suite 4/0/1 with the engine resolved from the sibling
+     checkout; vulkan exe builds and prints usage. Note: the stub Main
+     pulls no engine code, so `kernels skipped: 0` — expect 7 once the
+     serve loop binds LlmEngine (unit 2), and CHECK it then. -->
+- [x] 1.3.1 Both scripts run clean from a fresh checkout beside
       cajeta-llm.
 
 ## 2. Protocol core — parse, dispatch, answer (serial)

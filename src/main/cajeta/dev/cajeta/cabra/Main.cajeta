@@ -1,0 +1,36 @@
+package dev.cajeta.cabra;
+
+import cajeta.lang.String;
+import cajeta.lang.System;
+
+/**
+ * cabra — the resident-model serving harness (spec §1). A cabra is a
+ * goat; a harness is what you put on one.
+ *
+ *   cabra serve --model <gguf> [--ctx N] [--max-seqs N] [--device be]
+ *
+ * Loads the model ONCE, then answers id-tagged JSONL requests on stdin
+ * with id-tagged JSONL on stdout (spec §3.1.1/§3.1.2); every log line
+ * goes to stderr, stdout is protocol-pure. Resident until killed
+ * (spec §7.1); EOF on stdin drains and exits.
+ *
+ * Unit 1 ships the scaffold: argument surface and usage. The serve
+ * loop is Unit 2.
+ */
+public final class Main {
+
+    public static int32 main(String[] args) {
+        boolean isServe = (int32) args.count() >= 1
+            && args[0].equals("serve");
+        if (!isServe) {
+            System.stderr.println("usage: cabra serve --model <path> "
+                + "[--ctx N] [--max-seqs N] [--device <backend>]");
+            System.stderr.println("  JSONL on stdin -> JSONL on stdout; "
+                + "logs on stderr; EOF or {\"op\":\"shutdown\"} exits");
+            return 2;
+        }
+        // Unit 2 (plan 2.2.1) replaces this with the serve loop.
+        System.stderr.println("cabra: serve loop lands in plan unit 2");
+        return 2;
+    }
+}

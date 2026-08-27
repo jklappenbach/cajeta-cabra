@@ -1,0 +1,10 @@
+package dev.cajeta.cabra.selftest;
+
+import dev.cajeta.unit.Runner;
+
+/** Test entry: reflective @Test discovery across the binary. */
+public final class TestMain {
+    public static int32 run() {
+        return Runner.runAll();
+    }
+}
