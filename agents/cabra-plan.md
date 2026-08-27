@@ -17,6 +17,22 @@ checkout in dev / olla pin in release; `dev.cajeta.codec` (JSON);
 
 **Checkbox legend:** `- [ ]` open, `- [x]` done, `- [~]` blocked.
 
+**BOUNDARY REVISION (Julian, 2026-08-27).** The engine/harness split is
+now by KIND, not by layer — see `specs/cabra-spec.md` §1. The engine
+owns the model as a living thing (residency of weights, session/KV and
+prefix reuse, adapters, in-place training, checkpoints, model-set
+routing); cabra owns the model's hands (protocol, framing, batching
+demux, and the agent surface: tools, plugins, MCP, sandbox,
+permissions, audit). Serving stays here; residency-as-state moves to
+the engine. The dependency arrow stays one-way — the engine DECLARES
+seams (the `DiagSink` shape) and cabra implements them.
+
+Consequences for THIS plan: units 1-4 are unaffected (all serving).
+Unit 5's docs must describe the revised boundary. The next plan after
+this one is the tool/MCP surface, and the `ToolBroker`-shaped seam
+should be defined before the learning child specs, since 3.1 and 3.4
+both route through it.
+
 ---
 
 ## 1. Build + test scaffolding

@@ -15,10 +15,43 @@ cabra is the standard way to interact with a model in this ecosystem:
 interactively during development, programmatically from scripts and CI,
 and (later) as the installed application olla delivers.
 
-**Boundaries.** The reference ecosystem maps as
-`llama.cpp : llama-server : ollama` ≈ `dev.cajeta.llm : cabra : olla` —
-with the correction that ollama's two halves split here: distribution
-and install are olla's mandate; residency and serving are cabra's.
+**Boundaries.** REVISED 2026-08-27 (Julian's call, superseding the
+"residency and serving are cabra's" reading below). The split is no
+longer by layer but by KIND, and the test is: *what can only be done
+where the weights are?*
+
+- **`dev.cajeta.llm` owns the model as a living thing** — residency of
+  weights, session/KV lifetime and prefix reuse across turns, adapters,
+  in-place fine-tuning and training, checkpoints and deltas, and which
+  specialized model is live. None of that is expressible without the
+  forward graph and the tensors, so none of it can live in a harness
+  without reimplementing the engine.
+- **cabra owns the model's hands** — the execution context. Wire
+  protocol, framing, ids, backpressure, stream multiplexing; and the
+  agent surface: tools, plugins, MCP, sandboxing, permissions, audit.
+  Those need *the world*, not the weights.
+
+Note what did NOT move: residency-as-STATE is the engine's, but
+SERVING stays cabra's. Folding the protocol into the engine is the
+`llama.cpp → llama-server` path, and an engine with I/O in it stops
+being testable — every defect found 2026-08-27 (a dangling sink, an
+over-long prompt killing the process, a cross-talking demux) was a
+*serving* defect, caught precisely because serving was isolated and
+drivable from a test.
+
+**The dependency arrow is one-way and must stay so.** The model needs
+to CALL tools ("look up the truth when doubted"), and cabra owns tools
+— done naively that points the arrow both ways. Instead the ENGINE
+DECLARES THE INTERFACE and cabra implements it, exactly the shape of
+`dev.cajeta.llm.DiagSink`: the engine declares a tool-call intent seam,
+cabra implements it over MCP/plugins with sandboxing and audit. cabra
+depends on cajeta-llm; cajeta-llm depends on nothing. That also keeps
+the engine testable against a stub broker, which is the only way "the
+model doubted itself and looked something up" is ever deterministic.
+
+The reference ecosystem still maps as
+`llama.cpp : llama-server : ollama` ≈ `dev.cajeta.llm : cabra : olla`,
+with distribution and install olla's mandate.
 cabra is a SEPARATE project from cajeta-llm (decided 2026-08-26) and
 consumes ONLY the engine's public API (`LlmEngine`, `submitTokens`/
 `submitText`, `runAll`/`stepOnce`, `Request`, `SampleParams`,
@@ -119,6 +152,12 @@ on top of them.
   spec'd and built engine-side) so a conversation's shared prefix skips
   prefill; requires per-session affinity in the scheduler mapping.
   Recommendation is honest v1 scope, with 6.1-alt as the FIRST v2 item.
+- **6.2 OWNERSHIP (2026-08-27).** Under the §1 boundary revision,
+  6.1-alt is ENGINE work, not cabra work: sessions, KV lifetime, and
+  prefix reuse across turns are the model's living state. cabra's part
+  shrinks to naming the session on the wire (a `session` field on the
+  request) and honouring whatever affinity the engine asks for. Track
+  6.1-alt in the engine's plan; leave only the protocol field here.
 
 ## 7. Lifecycle
 

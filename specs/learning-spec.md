@@ -39,22 +39,40 @@ child specs.
 
 ## 3. The child specs (each: author with Julian, then plan)
 
-- **3.1 learning-memory** (cabra) — conversation capture, retrieval
-  over trusted sources, the doubt→verify→correct loop of 2.1. No
-  engine changes; nearest-term.
+**Ownership settled 2026-08-27** by the cabra-spec §1 boundary revision
+(engine = the model as a living thing; cabra = the model's hands). Four
+of the five land engine-side. Only *memory* genuinely splits, because
+storage and recall sit with the weights while ACQUISITION needs the
+world.
+
+- **3.1 learning-memory** (SPLIT — engine stores/recalls, cabra
+  acquires) — conversation capture, retrieval over trusted sources, the
+  doubt→verify→correct loop of 2.1. The retrieval and source access are
+  cabra's (they touch the network and the filesystem); the memory a
+  session carries, and its reuse across turns, is engine state. Driven
+  by an engine-declared intent seam, never by the engine reaching into
+  cabra. Nearest-term.
 - **3.2 learning-training** (cajeta-llm + cajeta-ml) — the backward
   pass through decoder blocks (the engine is deliberately tape-free/
   forward-only today), LoRA/QLoRA adapter application in `Linear`,
   optimizer via `dev.cajeta.ml`'s training core; plus the 2.5 targeted
   token-association update mechanism as its own section.
-- **3.3 learning-persistence** — checkpoint format, the delta log
-  (what a delta IS for adapters vs token-association edits), replay,
-  compaction, clean-shutdown state.
-- **3.4 learning-routing** — correction-nature → mechanism policy:
-  which corrections become memory, which become weight updates, which
-  demand verification first.
-- **3.5 model-set** — the 8–12B candidates and any per-task
-  specialization; the bring-up order.
+- **3.3 learning-persistence** (cajeta-llm) — checkpoint format, the
+  delta log (what a delta IS for adapters vs token-association edits),
+  replay, compaction, clean-shutdown state. Engine-side: a checkpoint
+  is weights plus adapter state, and only the engine can write it.
+- **3.4 learning-routing** (cajeta-llm) — correction-nature → mechanism
+  policy: which corrections become memory, which become weight updates,
+  which demand verification first. The DECISION is the engine's; the
+  verification step it may demand is executed through cabra's tool
+  seam.
+- **3.5 model-set** (cajeta-llm) — the 8–12B candidates and any
+  per-task specialization; the bring-up order. Which specialist is live
+  is engine residency state.
+
+**Sequencing note.** The `ToolBroker`-shaped seam (engine declares,
+cabra implements) is cheap to define now and expensive to retrofit,
+because 3.1 and 3.4 both route through it. Define it before either.
 
 ## 4. Constraints known today
 
