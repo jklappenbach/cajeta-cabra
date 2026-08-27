@@ -1,5 +1,6 @@
 package dev.cajeta.cabra;
 
+import cajeta.collection.ArrayList;
 import cajeta.lang.String;
 
 /**
@@ -34,6 +35,13 @@ public final class Req {
     public float32 repeatPenalty;
     public int64 seed;
 
+    // Halting strings (spec §4.3). The engine checks these against a
+    // rolling detokenized tail (SampleParams.stops), so cabra hands them
+    // straight through rather than truncating after the fact — a
+    // post-hoc trim would still have STREAMED the text it meant to
+    // suppress. Null when the request named none.
+    public ArrayList<String> stops;
+
     public Req() {
         this.ok = false;
         this.err = "";
@@ -48,5 +56,6 @@ public final class Req {
         this.topP = 0.95f;
         this.repeatPenalty = 1.0f;
         this.seed = 0L;
+        this.stops = null;
     }
 }

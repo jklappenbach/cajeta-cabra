@@ -27,10 +27,18 @@ LLM_SRC="${LLM_SRC:-$here/../cajeta-llm/src/main/cajeta}"
 
 mkdir -p "$here/tmp"
 LOG="$here/tmp/bld-$(basename "$OUT").log"
-# TWO STEPS, not one: a build over two source roots leaves the second
-# root's types unresolved from the first (hit twice on 2026-08-27, in
-# the test build and here), so the engine becomes an archive first and
-# cabra compiles against it.
+# TWO STEPS, not one, and this is the DESIGNED shape rather than a
+# workaround: a compile reads exactly ONE source root (`cajeta <entry>
+# <source-root> <output-dir>`), so a second tree is a dependency — the
+# engine becomes an archive and cabra compiles against it via
+# --classpath. The engine repo's own run-tests.sh does the same.
+#
+# Passing both trees as positionals looked like it worked and did not:
+# the extra argument SHIFTED the rest, binding the engine tree to the
+# output directory (exit 0, empty output dir, object files written into
+# a source tree, none of its types compiled). That silent misread is
+# fixed in the compiler as of cajeta c963d19b — it is now a hard error
+# naming --classpath.
 "$CAJETA" --emit=cja -o "$here/tmp/llm-$BE.cja" \
     --classpath="$CODEC,$JINJA" \
     dev.cajeta.llm.Llm.run "$LLM_SRC" "$here/tmp" > "$LOG" 2>&1

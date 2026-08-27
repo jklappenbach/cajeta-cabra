@@ -1,0 +1,82 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.ChatOp;
+import dev.cajeta.llm.EngineOptions;
+import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.llm.chat.ChatTemplate;
+import dev.cajeta.llm.tok.Tokenizer;
+
+/**
+ * Plan 3.1.1 — the `chat` op renders through THE MODEL'S template, and
+ * refuses when the model ships none.
+ *
+ * The refusal arm is the one that matters: a harness that falls back to
+ * a plausible template when the model has none still produces fluent
+ * text, so the defect is invisible on the wire and gets attributed to
+ * the model. Pinning `render(null, ...) == null` keeps the guessing
+ * path from ever being added back as a convenience.
+ */
+public class ChatOpTest {
+
+    static final String TOY =
+        "../cajeta-llm/src/test/fixtures/gguf/toy.gguf";
+    static final String MSGS =
+        "[{\"role\": \"user\", \"content\": \"hi\"}]";
+
+    public ChatOpTest() { return; }
+
+    @Test
+    public void rendersThroughTheModelsOwnTemplate() {
+        EngineOptions opts = heap EngineOptions(ChatOpTest.TOY);
+        opts.ctx = 64;
+        opts.maxSeqs = 1;
+        LlmEngine e #= LlmEngine.load(#opts);
+        Tokenizer tok = e.tokenizer();
+
+        ChatTemplate t #= ChatOp.forModel(ChatOpTest.TOY, tok);
+        Assert.isTrue(t != null);
+        String rendered #= ChatOp.render(t, ChatOpTest.MSGS);
+        // The fixture's embedded template, byte for byte — the same
+        // string the engine's own GgufTest pins, so a drift in either
+        // repo shows up here rather than as odd generations.
+        Assert.equals("<|user|>hi<|end|><|assistant|>", rendered);
+        e.close();
+    }
+
+    /**
+     * The render already carries BOS, so the chat path must use the RAW
+     * `encode`. `encodePrompt` would prepend a second one. Asserted as a
+     * DIFFERENCE between the two encodings rather than a fixed id list,
+     * so the test states the discipline instead of a vocabulary detail.
+     */
+    @Test
+    public void chatEncodingIsRawSoBosIsNotDoubled() {
+        EngineOptions opts = heap EngineOptions(ChatOpTest.TOY);
+        opts.ctx = 64;
+        opts.maxSeqs = 1;
+        LlmEngine e #= LlmEngine.load(#opts);
+        Tokenizer tok = e.tokenizer();
+
+        ChatTemplate t #= ChatOp.forModel(ChatOpTest.TOY, tok);
+        String rendered #= ChatOp.render(t, ChatOpTest.MSGS);
+        int32[] raw #= tok.encode(rendered);
+        Assert.isTrue((int32) raw.count() > 0);
+        if (tok.addsBos()) {
+            int32[] withBos #= tok.encodePrompt(rendered);
+            Assert.equals((int64) raw.count() + 1L,
+                (int64) withBos.count());
+        }
+        e.close();
+    }
+
+    /** No template -> no prompt. The caller turns this into an error
+     *  object; it must never become a default template. */
+    @Test
+    public void refusesToGuessWhenTheModelShipsNoTemplate() {
+        String out #= ChatOp.render(null, ChatOpTest.MSGS);
+        Assert.isTrue(out == null);
+    }
+}

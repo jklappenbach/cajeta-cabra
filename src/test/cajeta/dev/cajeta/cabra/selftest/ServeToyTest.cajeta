@@ -38,15 +38,14 @@ public class ServeToyTest {
 
         String path = "tmp/serve-toy-test.jsonl";
         FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
-        JsonLinesWriter out = heap JsonLinesWriter(fw);
-        Serve s = heap Serve(#e, #out, ServeToyTest.TOY, 256);
+        Serve s = heap Serve(#e, #fw, ServeToyTest.TOY, 256);
 
         boolean cont = s.handleLine("{\"op\":\"generate\",\"id\":11,"
             + "\"prompt\":\"hello\",\"n\":4,\"temp\":0}");
         Assert.isTrue(cont);
         boolean end = s.handleLine("{\"op\":\"shutdown\"}");
         Assert.isFalse(end);
-        fw.close();
+        s.close();
 
         int8[] all #= File.readAllBytes(path);
         String text = heap String(#all, (int32) all.count());

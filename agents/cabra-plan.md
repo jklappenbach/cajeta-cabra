@@ -85,11 +85,15 @@ checkout in dev / olla pin in release; `dev.cajeta.codec` (JSON);
   framing. Fixed in the compiler repo (bc825d85) with its own
   round-trip test; the first piped run promptly streamed a `\u0004`
   chunk through the fix.
-- COMPILER GAP observed twice and routed around, not fixed: a build
-  over TWO source roots leaves the second root's types unresolved from
-  the first. Both run-tests.sh and scripts/bld.sh now build the engine
-  as a .cja first (the engine repo's own pattern). Worth a compiler
-  repro + fix later.
+- COMPILER GAP — diagnosed and FIXED 2026-08-27 (cajeta c963d19b), and
+  the original description here was wrong. It is not a resolution bug:
+  the compile verb reads exactly THREE positionals (entry, source root,
+  output dir) and only guarded the low side, so a fourth argument
+  SHIFTED the rest and bound the second source tree to the output
+  directory — exit 0, empty output dir, object files written into a
+  source tree, none of that tree's types compiled. Multi-tree builds
+  were always a --classpath workflow (the engine repo's own pattern,
+  which both scripts here follow). Now a hard error naming --classpath.
 - Suite 10/0/1; pipe acceptance: 6/6 stdout lines machine-parse, logs
   on stderr, exit 0.
 
@@ -100,29 +104,60 @@ checkout in dev / olla pin in release; `dev.cajeta.codec` (JSON);
 ## 3. Chat op, finish reasons, health, shutdown
 
 ### 3.1 TDD
-- [ ] 3.1.1 `chat` renders through the model's template: over a
+- [x] 3.1.1 `chat` renders through the model's template: over a
       template-bearing fixture, the rendered ids equal
       tokenizer.encode(template.render(messages)) — the same
       no-double-BOS discipline chatMain already pins.
-- [ ] 3.1.2 Finish mapping: budget-capped → `"budget"`; a stop-string
+- [x] 3.1.2 Finish mapping: budget-capped → `"budget"`; a stop-string
       request → `"stop"`; toy-model EOG (if the fixture can emit it) →
       `"eos"`. Each also asserts the OTHER reasons did not fire.
-- [ ] 3.1.3 `health` before load reports `loading`, after `ready`
+- [x] 3.1.3 `health` before load reports `loading`, after `ready`
       (drive by calling the handler around a stubbed/loaded engine).
-- [ ] 3.1.4 `shutdown` drains: a request in flight completes its done
+      **DEVIATION**: a serial loop cannot genuinely answer *during*
+      load — stdin is not read until `LlmEngine.load` returns, so the
+      wire can never carry `loading` in v1. Rather than fake it, the
+      state is an explicit `Serve.setState` seam the test drives
+      through both values; Unit 4's reader thread is what makes a real
+      during-load answer possible, and 4.1 owns that assertion.
+- [x] 3.1.4 `shutdown` drains: a request in flight completes its done
       line before exit; EOF behaves identically.
 
 ### 3.2 Coding
-- [ ] 3.2.1 `chat` op via ChatTemplate (metadata template; refuse with
+- [x] 3.2.1 `chat` op via ChatTemplate (metadata template; refuse with
       an error object when the model ships none — never guess a
       template).
-- [ ] 3.2.2 Stop strings (spec 4.3) — engine SampleParams.stops if
+- [x] 3.2.2 Stop strings (spec 4.3) — engine SampleParams.stops if
       wired, else post-hoc truncation in cabra; record which.
-- [ ] 3.2.3 health/shutdown ops + EOF handling.
+- [x] 3.2.3 health/shutdown ops + EOF handling.
 
 ### 3.3 Acceptance
-- [ ] 3.3.1 A scripted 3-turn conversation over the toy model, run
+- [x] 3.3.1 A scripted 3-turn conversation over the toy model, run
       twice, is byte-identical at temp 0.
+
+#### Unit 3 notes (2026-08-27)
+- 3.2.2 resolved to the ENGINE path: `SampleParams.stops` is already
+  wired (checked against a rolling detokenized tail), so cabra hands
+  stop strings through rather than truncating after the fact — a
+  post-hoc trim would already have STREAMED the text it suppresses.
+- Two defects the unit tests did not catch, both found by running the
+  3.3.1 acceptance for real:
+  1. `serveOver` handed Serve a JsonLinesWriter built over a FileWriter
+     the helper still owned. JsonLinesWriter stores its sink with `#=`
+     from a PLAIN parameter, so it records a BORROW — the sink died on
+     return. Empty transcripts, then heap corruption. Serve now owns
+     the FileWriter and builds the writer itself.
+  2. Turn three rendered to 73 tokens against `--ctx 64`. An
+     over-long prompt is never ADMITTED, so the scheduler stayed
+     not-done, `runAll` spun to its cap and threw, and the exception
+     killed the resident server mid-session. Now: an explicit error
+     answer before submit, plus a try/catch so NO engine fault is
+     fatal — Unit 2's liveness rule extended past malformed lines.
+     Pinned by `promptLongerThanTheContextAnswersAnErrorAndKeepsServing`.
+- The per-request step bound is now `promptLen + n + 64` rather than
+  `ctx * 4`, which was simultaneously too small for a long prompt and
+  unbounded slack for a short one.
+- Suite 20/0/1. Acceptance: 3 turns, 3 done lines, 0 errors, exit 0,
+  byte-identical across two runs.
 
 ## 4. Concurrency — id-multiplexed continuous batching
 

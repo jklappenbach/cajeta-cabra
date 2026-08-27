@@ -1,0 +1,295 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonLinesWriter;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.collection.ArrayList;
+import cajeta.io.file.File;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.ChatOp;
+import dev.cajeta.cabra.Serve;
+import dev.cajeta.llm.EngineOptions;
+import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.llm.chat.ChatTemplate;
+
+/**
+ * Plan 3.1.2 / 3.1.3 / 3.1.4 — finish reasons, health, and shutdown
+ * drain, all read back off the wire.
+ *
+ * Each finish arm asserts the OTHER reasons did NOT fire. A mapping that
+ * collapses to a single constant passes any single-reason test, and
+ * "budget" is the default in the code under test, so the stop arm is the
+ * only one that can catch a collapsed mapping.
+ */
+public class ServeOpsTest {
+
+    static final String TOY =
+        "../cajeta-llm/src/test/fixtures/gguf/toy.gguf";
+
+    public ServeOpsTest() { return; }
+
+    // ── harness ────────────────────────────────────────────────────────
+
+    /** Split a JSONL file into its non-empty lines. */
+    static #ArrayList<String> linesOf(String path) {
+        int8[] all #= File.readAllBytes(path);
+        String text = heap String(#all, (int32) all.count());
+        int8[] tb #= text.toBytes();
+        ArrayList<String> out = heap ArrayList<String>();
+        int32 start = 0;
+        int32 i = 0;
+        while (i <= (int32) tb.count()) {
+            boolean atEnd = i == (int32) tb.count();
+            if (atEnd || tb[i] == (int8) 10) {
+                if (i > start) {
+                    String line #= text.substring(start, i);
+                    out.add(#line);
+                }
+                start = i + 1;
+            }
+            i = i + 1;
+        }
+        return #out;
+    }
+
+    /** The single `done` object in a transcript (null when absent). */
+    static #JsonValue doneOf(ArrayList<String> lines) {
+        int32 i = 0;
+        while (i < (int32) lines.count()) {
+            JsonValue v #= Json.parse(lines.get(i));
+            if (v.kind() == JsonValue.OBJECT
+                    && v.object().containsKey("done")) {
+                return #v;
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    /** Serve owns the sink — handing it a writer over a FileWriter this
+     *  helper still owned left a dangling borrow the moment the helper
+     *  returned (empty transcripts, then heap corruption). */
+    static #Serve serveOver(String path, #LlmEngine e) {
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, ServeOpsTest.TOY, 256);
+        return #s;
+    }
+
+    static #Serve serveOverCtx(String path, #LlmEngine e, int32 ctx) {
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, ServeOpsTest.TOY, ctx);
+        return #s;
+    }
+
+    // ── liveness: an over-long prompt is an ANSWER, not a death ────────
+
+    /**
+     * Found by the 3.3.1 acceptance run, not by a unit test: turn three
+     * of a chat rendered past `--ctx`, the scheduler never admitted the
+     * request, `runAll` spun to its cap and threw, and the exception took
+     * the whole resident server down mid-session. A request error must
+     * never be a server fault.
+     */
+    @Test
+    public void promptLongerThanTheContextAnswersAnErrorAndKeepsServing() {
+        EngineOptions opts = heap EngineOptions(ServeOpsTest.TOY);
+        opts.ctx = 64;
+        opts.maxSeqs = 1;
+        LlmEngine e #= LlmEngine.load(#opts);
+        String path = "tmp/ops-toolong.jsonl";
+        // A window far too small for the prompt below.
+        Serve s #= ServeOpsTest.serveOverCtx(path, #e, 8);
+
+        boolean cont = s.handleLine("{\"op\":\"generate\",\"id\":9,"
+            + "\"prompt\":\"the quick brown fox jumps over the lazy dog "
+            + "and keeps running well past any short context window\","
+            + "\"n\":16,\"temp\":0}");
+        // The server SURVIVES — this is the whole point.
+        Assert.isTrue(cont);
+        // ...and still serves the next request.
+        boolean cont2 = s.handleLine("{\"op\":\"health\",\"id\":10}");
+        Assert.isTrue(cont2);
+        s.close();
+
+        ArrayList<String> lines #= ServeOpsTest.linesOf(path);
+        Assert.equals(2L, (int64) lines.count());
+        JsonValue err #= Json.parse(lines.get(0));
+        Assert.isTrue(err.object().containsKey("error"));
+        Assert.equals(9L, err.object().get("id").asInt64());
+        // No done line was emitted for a request that never ran.
+        Assert.isFalse(err.object().containsKey("done"));
+        JsonValue h #= Json.parse(lines.get(1));
+        Assert.equals("ready", h.object().get("state").asString());
+    }
+
+    // ── 3.1.2 finish mapping ───────────────────────────────────────────
+
+    /** Budget: -n reached, and NEITHER of the other two reasons. */
+    @Test
+    public void budgetCapFinishesAsBudget() {
+        EngineOptions opts = heap EngineOptions(ServeOpsTest.TOY);
+        opts.ctx = 64;
+        opts.maxSeqs = 1;
+        LlmEngine e #= LlmEngine.load(#opts);
+        String path = "tmp/ops-budget.jsonl";
+        Serve s #= ServeOpsTest.serveOver(path, #e);
+        s.handleLine("{\"op\":\"generate\",\"id\":1,\"prompt\":\"hello\","
+            + "\"n\":4,\"temp\":0}");
+        s.close();
+
+        ArrayList<String> lines #= ServeOpsTest.linesOf(path);
+        JsonValue d #= ServeOpsTest.doneOf(lines);
+        Assert.isTrue(d != null);
+        String fin #= d.object().get("finish").asString();
+        Assert.equals("budget", fin);
+        Assert.isFalse(fin.equals("stop"));
+        Assert.isFalse(fin.equals("eos"));
+        Assert.equals(4L,
+            d.object().get("usage").object().get("gen_tokens").asInt64());
+    }
+
+    /**
+     * Stop: a halting string the engine sees in the rolling detokenized
+     * tail. The toy model at temp 0 emits "b", U+0004, "e", "$" — so
+     * "e" halts it short of the budget, and the budget must NOT be the
+     * reported reason even though it is the code's default.
+     */
+    @Test
+    public void stopStringFinishesAsStopBeforeTheBudget() {
+        EngineOptions opts = heap EngineOptions(ServeOpsTest.TOY);
+        opts.ctx = 64;
+        opts.maxSeqs = 1;
+        LlmEngine e #= LlmEngine.load(#opts);
+        String path = "tmp/ops-stop.jsonl";
+        Serve s #= ServeOpsTest.serveOver(path, #e);
+        s.handleLine("{\"op\":\"generate\",\"id\":2,\"prompt\":\"hello\","
+            + "\"n\":16,\"temp\":0,\"stop\":[\"e\"]}");
+        s.close();
+
+        ArrayList<String> lines #= ServeOpsTest.linesOf(path);
+        JsonValue d #= ServeOpsTest.doneOf(lines);
+        Assert.isTrue(d != null);
+        String fin #= d.object().get("finish").asString();
+        Assert.equals("stop", fin);
+        Assert.isFalse(fin.equals("budget"));
+        Assert.isFalse(fin.equals("eos"));
+        // It genuinely halted EARLY — otherwise "stop" would just be a
+        // relabelled budget stop.
+        Assert.isTrue(
+            d.object().get("usage").object().get("gen_tokens").asInt64()
+                < 16L);
+    }
+
+    // ── 3.1.3 health ───────────────────────────────────────────────────
+
+    @Test
+    public void healthReportsLoadingThenReady() {
+        EngineOptions opts = heap EngineOptions(ServeOpsTest.TOY);
+        opts.ctx = 64;
+        opts.maxSeqs = 1;
+        LlmEngine e #= LlmEngine.load(#opts);
+        String path = "tmp/ops-health.jsonl";
+        Serve s #= ServeOpsTest.serveOver(path, #e);
+
+        s.setState("loading");
+        s.handleLine("{\"op\":\"health\",\"id\":7}");
+        s.setState("ready");
+        s.handleLine("{\"op\":\"health\",\"id\":8}");
+        s.close();
+
+        ArrayList<String> lines #= ServeOpsTest.linesOf(path);
+        Assert.equals(2L, (int64) lines.count());
+        JsonValue a #= Json.parse(lines.get(0));
+        Assert.equals("loading", a.object().get("state").asString());
+        JsonValue b #= Json.parse(lines.get(1));
+        Assert.equals("ready", b.object().get("state").asString());
+        Assert.equals(8L, b.object().get("id").asInt64());
+    }
+
+    // ── 3.1.4 shutdown drains ──────────────────────────────────────────
+
+    /**
+     * A request already answered before `shutdown` keeps its done line,
+     * and shutdown itself emits nothing — the transcript ends on the
+     * done, not truncated mid-stream.
+     */
+    @Test
+    public void shutdownDrainsTheInFlightRequest() {
+        EngineOptions opts = heap EngineOptions(ServeOpsTest.TOY);
+        opts.ctx = 64;
+        opts.maxSeqs = 1;
+        LlmEngine e #= LlmEngine.load(#opts);
+        String path = "tmp/ops-drain.jsonl";
+        Serve s #= ServeOpsTest.serveOver(path, #e);
+
+        boolean cont = s.handleLine("{\"op\":\"generate\",\"id\":3,"
+            + "\"prompt\":\"hello\",\"n\":3,\"temp\":0}");
+        Assert.isTrue(cont);
+        boolean end = s.handleLine("{\"op\":\"shutdown\"}");
+        Assert.isFalse(end);
+        s.close();
+
+        ArrayList<String> lines #= ServeOpsTest.linesOf(path);
+        // Last line is the done — nothing was cut off, and shutdown did
+        // not append a line of its own.
+        JsonValue last #= Json.parse(lines.get((int32) lines.count() - 1));
+        Assert.isTrue(last.object().containsKey("done"));
+        Assert.equals(3L, last.object().get("id").asInt64());
+    }
+
+    // ── 3.2.1 chat refusal on the wire ─────────────────────────────────
+
+    /** No template -> an error object, and the loop stays alive. */
+    @Test
+    public void chatWithoutATemplateAnswersAnErrorAndKeepsServing() {
+        EngineOptions opts = heap EngineOptions(ServeOpsTest.TOY);
+        opts.ctx = 64;
+        opts.maxSeqs = 1;
+        LlmEngine e #= LlmEngine.load(#opts);
+        String path = "tmp/ops-chat-refuse.jsonl";
+        Serve s #= ServeOpsTest.serveOver(path, #e);
+        // Template deliberately left unset — the model-ships-none case.
+        boolean cont = s.handleLine("{\"op\":\"chat\",\"id\":4,"
+            + "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+        Assert.isTrue(cont);
+        s.close();
+
+        ArrayList<String> lines #= ServeOpsTest.linesOf(path);
+        JsonValue v #= Json.parse(lines.get(0));
+        Assert.isTrue(v.object().containsKey("error"));
+        Assert.equals(4L, v.object().get("id").asInt64());
+    }
+
+    /** With the model's template installed, chat generates for real. */
+    @Test
+    public void chatWithATemplateStreamsAndCompletes() {
+        EngineOptions opts = heap EngineOptions(ServeOpsTest.TOY);
+        opts.ctx = 64;
+        opts.maxSeqs = 1;
+        LlmEngine e #= LlmEngine.load(#opts);
+        ChatTemplate t #= ChatOp.forModel(ServeOpsTest.TOY, e.tokenizer());
+        Assert.isTrue(t != null);
+
+        String path = "tmp/ops-chat.jsonl";
+        Serve s #= ServeOpsTest.serveOver(path, #e);
+        s.setTemplate(#t);
+        s.handleLine("{\"op\":\"chat\",\"id\":5,\"n\":3,\"temp\":0,"
+            + "\"messages\":[{\"role\":\"user\",\"content\":\"hi\"}]}");
+        s.close();
+
+        ArrayList<String> lines #= ServeOpsTest.linesOf(path);
+        JsonValue d #= ServeOpsTest.doneOf(lines);
+        Assert.isTrue(d != null);
+        Assert.equals(5L, d.object().get("id").asInt64());
+        // The rendered prompt is longer than the bare "hi", so the
+        // template really was applied on the way in.
+        Assert.isTrue(
+            d.object().get("usage").object().get("prompt_tokens").asInt64()
+                > 1L);
+    }
+}

@@ -8,6 +8,7 @@ import cajeta.lang.String;
 import cajeta.lang.System;
 import dev.cajeta.llm.EngineOptions;
 import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.llm.chat.ChatTemplate;
 
 /**
  * cabra — the resident-model serving harness (spec §1). A cabra is a
@@ -70,9 +71,18 @@ public final class Main {
             opts.device = device;
         }
         LlmEngine e #= LlmEngine.load(#opts);
-        FileWriter fw = heap FileWriter(1);
-        JsonLinesWriter out = heap JsonLinesWriter(fw);
-        Serve s = heap Serve(#e, #out, model, ctx * 4);
+        FileWriter fw #= heap FileWriter(1);
+        // The template comes from the model's own metadata, and stays
+        // null when it ships none — `chat` then refuses rather than
+        // guessing one (plan 3.2.1).
+        ChatTemplate tpl #= ChatOp.forModel(model, e.tokenizer());
+        Serve s = heap Serve(#e, #fw, model, ctx);
+        if (tpl != null) {
+            s.setTemplate(#tpl);
+        } else {
+            System.stderr.println("cabra: model ships no chat template - "
+                + "the \"chat\" op will refuse; use \"generate\"");
+        }
         System.stderr.println("cabra: ready (jsonl on stdin; "
             + "{\"op\":\"shutdown\"} or EOF exits)");
 

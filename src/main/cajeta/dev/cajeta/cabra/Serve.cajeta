@@ -1,25 +1,29 @@
 package dev.cajeta.cabra;
 
 import cajeta.codec.json.JsonLinesWriter;
+import cajeta.collection.ArrayList;
+import cajeta.io.file.FileWriter;
 import cajeta.lang.String;
-import cajeta.lang.System;
 import cajeta.time.Clock;
 import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.llm.chat.ChatTemplate;
 import dev.cajeta.llm.gen.SampleParams;
 import dev.cajeta.llm.gen.TokenSink;
 import dev.cajeta.llm.sched.Request;
 
 /**
- * The serial serve loop (plan 2.2.3): one request in flight, driven to
- * completion, streamed as it decodes. Implements the engine's
- * `TokenSink` so every generated token becomes a chunk line the moment
- * it lands — EOG ids filtered through `engine.isEog` (spec §4.2), so a
- * stop token never reaches the wire.
+ * The serial serve loop (plan 2.2.3, extended by 3.2): one request in
+ * flight, driven to completion, streamed as it decodes. Implements the
+ * engine's `TokenSink` so every generated token becomes a chunk line the
+ * moment it lands — EOG ids filtered through `engine.isEog` (spec §4.2),
+ * so a stop token never reaches the wire.
  *
- * Owns the engine and the protocol writer; the caller (Main, or a
- * test) feeds it lines. Returns false from `handleLine` when the
- * session should end (`shutdown`); EOF is the caller noticing stdin
- * closed, and means the same.
+ * Owns the engine and the protocol writer; the caller (Main, or a test)
+ * feeds it lines. Returns false from `handleLine` when the session should
+ * end (`shutdown`); EOF is the caller noticing stdin closed, and means
+ * the same. Either way the in-flight request has already emitted its done
+ * line, because `handleLine` is synchronous — draining is structural
+ * here, and stays a real obligation once Unit 4 makes requests concurrent.
  *
  * Timing for the usage block is measured HERE, not in the engine:
  * prefill_ms is submit-to-first-token, decode_ms first-token-to-done —
@@ -28,21 +32,34 @@ import dev.cajeta.llm.sched.Request;
 public final class Serve implements TokenSink {
 
     LlmEngine engine;          // owned
-    JsonLinesWriter out;       // owned
+    // BOTH owned, and that is load-bearing: JsonLinesWriter stores its
+    // sink with `#=` from a PLAIN parameter, so it records a BORROW
+    // (ownership §1: a call argument lends unless the caller writes #).
+    // A caller that let its FileWriter local drop while handing us the
+    // writer left the sink dangling — every emit went nowhere and the
+    // heap corrupted on the way out. Serve outlives both, so it holds
+    // both.
+    FileWriter sink;           // owned
+    JsonLinesWriter out;       // owned; borrows `sink`
+    ChatTemplate tpl;          // owned; null when the model ships none
     String modelPath;
-    int32 runBound;            // scheduler step bound per request
+    String state;              // health: "loading" | "ready"
+    int32 ctx;                 // context window, in tokens
 
     // Per-request streaming state (serial: one in flight).
     int64 curId;
     int64 t0Ns;
     int64 firstNs;
 
-    public Serve(#LlmEngine engine, #JsonLinesWriter out,
-            String modelPath, int32 runBound) {
+    public Serve(#LlmEngine engine, #FileWriter sink,
+            String modelPath, int32 ctx) {
         this.engine #= engine;
-        this.out #= out;
+        this.sink #= sink;
+        this.out = heap JsonLinesWriter(this.sink);
+        this.tpl = null;
         this.modelPath = modelPath;
-        this.runBound = runBound;
+        this.state = "ready";
+        this.ctx = ctx;
         this.curId = 0L;
         this.t0Ns = 0L;
         this.firstNs = 0L;
@@ -51,6 +68,29 @@ public final class Serve implements TokenSink {
 
     public LlmEngine engineRef() {
         return this.engine;
+    }
+
+    /** Install the model's chat template. Left unset (null) the `chat`
+     *  op refuses — cabra never guesses a template (plan 3.2.1). */
+    public void setTemplate(#ChatTemplate t) {
+        this.tpl #= t;
+        return;
+    }
+
+    /** Health state the `health` op reports. Main flips this to "ready"
+     *  once the engine is up. */
+    public void setState(String s) {
+        this.state = s;
+        return;
+    }
+
+    /** Drain and release the sink. Every emit already flushes, so this
+     *  is the last-line guarantee for a reader that opens the transcript
+     *  after us. */
+    public void close() {
+        this.out.flush();
+        this.sink.close();
+        return;
     }
 
     /** One protocol line. Returns false when the loop should end. */
@@ -64,40 +104,100 @@ public final class Serve implements TokenSink {
             return false;
         }
         if (r.op.equals("health")) {
-            // Reached only with a loaded engine — Main answers `loading`
-            // itself before construction (plan 3.1.3 refines this).
-            Protocol.emitHealth(this.out, r.id, "ready", this.modelPath);
-            return true;
-        }
-        if (r.op.equals("chat")) {
-            Protocol.emitError(this.out, r.id, r.hasId,
-                "chat lands in plan unit 3 - use generate");
+            Protocol.emitHealth(this.out, r.id, this.state,
+                this.modelPath);
             return true;
         }
         if (!r.hasId) {
             // Streaming without a correlation key is unanswerable.
             Protocol.emitError(this.out, 0L, false,
-                "generate needs an id");
+                r.op + " needs an id");
             return true;
         }
-        this.generate(r);
+
+        if (r.op.equals("chat")) {
+            String rendered #= ChatOp.render(this.tpl, r.messagesRaw);
+            if (rendered == null) {
+                Protocol.emitError(this.out, r.id, true,
+                    "this model ships no chat template - use \"generate\" "
+                    + "with a raw prompt");
+                return true;
+            }
+            // RAW encode: the render already carries BOS and the role
+            // headers, so encodePrompt would prepend a second BOS.
+            int32[] ids #= this.engine.tokenizer().encode(rendered);
+            this.run(r, #ids);
+            return true;
+        }
+
+        int32[] ids #= this.engine.tokenizer().encodePrompt(r.prompt);
+        this.run(r, #ids);
         return true;
     }
 
-    void generate(Req r) {
-        int32[] ids #= this.engine.tokenizer().encodePrompt(r.prompt);
+    void run(Req r, #int32[] ids) {
         SampleParams p = heap SampleParams(r.temp, r.seed);
         p.topK = r.topK;
         p.topP = r.topP;
         p.repeatPenalty = r.repeatPenalty;
         // stopTokens stays null: the engine fills the model's EOG set.
+        // `stops` goes to the ENGINE rather than being trimmed after the
+        // fact — it checks them against a rolling detokenized tail, so a
+        // halt suppresses the text before it streams, where a post-hoc
+        // trim would already have sent it (plan 3.2.2).
+        //
+        // OWNED COPIES, not `p.stops #= r.stops`: that records a BORROW
+        // of the Req (ownership §2.3), but `#p` hands SampleParams to the
+        // engine, which keeps it on the Request past this call — while
+        // the Req drops at the end of it. The lend would dangle.
+        if (r.stops != null) {
+            ArrayList<String> sc = heap ArrayList<String>();
+            int32 si = 0;
+            while (si < r.stops.count()) {
+                String s0 = r.stops.get(si);
+                int8[] sb #= s0.toBytes();
+                String cp = heap String(#sb, s0.byteLength());
+                sc.add(#cp);
+                si = si + 1;
+            }
+            p.stops #= sc;
+        }
+
+        int32 n = (int32) ids.count();
+        // A prompt that cannot fit the window is never ADMITTED, and an
+        // unadmitted request leaves the scheduler permanently not-done: it spins to
+        // the step cap and throws. Caught here as a plain answer, because
+        // "your prompt is longer than the context" is a request error, not
+        // a server fault — and the third turn of a chat is exactly where
+        // it shows up.
+        if (n + r.n > this.ctx) {
+            Protocol.emitError(this.out, r.id, true,
+                "prompt is " + n + " tokens and -n is " + r.n
+                + ", which exceeds the " + this.ctx + "-token context");
+            return;
+        }
 
         this.curId = r.id;
         this.firstNs = 0L;
         this.t0Ns = Clock.nanoTime();
-        int32 rid = this.engine.submitTokens(ids, (int32) ids.count(),
-            r.n, #p);
-        this.engine.runAll(this.runBound);
+        // Bound the drive by what THIS request can need — one step per
+        // generated token plus prefill and admission slack — rather than
+        // a context-derived guess that is both too small for a long
+        // prompt and unbounded slack for a short one.
+        int32 bound = n + r.n + 64;
+        int32 rid = 0;
+        try {
+            rid = this.engine.submitTokens(ids, n, r.n, #p);
+            this.engine.runAll(bound);
+        } catch (Throwable t) {
+            // Liveness (spec §3.2): a failed request is answered, never
+            // fatal. Unit 2 pinned this for malformed lines; an engine
+            // fault has to obey the same rule or one bad prompt takes the
+            // resident model down with it.
+            Protocol.emitError(this.out, r.id, true,
+                "generation failed: " + t.getMessage());
+            return;
+        }
         int64 endNs = Clock.nanoTime();
 
         Request q = this.engine.request(rid);
@@ -116,7 +216,7 @@ public final class Serve implements TokenSink {
         } else {
             pMs = (endNs - this.t0Ns) / 1000000L;
         }
-        Protocol.emitDone(this.out, r.id, finish, (int64) ids.count(),
+        Protocol.emitDone(this.out, r.id, finish, (int64) n,
             (int64) q.generatedCount(), pMs, dMs);
         return;
     }

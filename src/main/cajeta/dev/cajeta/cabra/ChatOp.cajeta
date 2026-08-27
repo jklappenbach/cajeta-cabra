@@ -1,0 +1,74 @@
+package dev.cajeta.cabra;
+
+import cajeta.lang.String;
+import dev.cajeta.llm.chat.ChatTemplate;
+import dev.cajeta.llm.io.GgufFile;
+import dev.cajeta.llm.tok.Tokenizer;
+
+/**
+ * The `chat` op's rendering half (plan 3.2.1) — messages in, prompt out,
+ * through the MODEL'S OWN template and no other.
+ *
+ * Kept separate from `Serve` so the refusal path is reachable without a
+ * loaded engine: `render` takes a nullable template and answers null
+ * when there is none, which is the whole contract. A serving harness
+ * that guesses a template when the model ships none produces fluent,
+ * confidently wrong output — the failure is invisible at the wire and
+ * shows up as "the model is bad". cabra refuses instead.
+ *
+ * The render already carries BOS and the role headers, so encoding is
+ * the RAW `encode`, never `encodePrompt` — the same no-double-BOS
+ * discipline cajeta-llm's `chat` verb pins.
+ */
+public final class ChatOp {
+
+    public ChatOp() { return; }
+
+    /**
+     * The model's embedded chat template, or null when it ships none.
+     * Mirrors the engine CLI's construction exactly: the template text,
+     * the BOS marker only when the tokenizer adds one, and the EOS
+     * marker resolved through the model's own metadata id.
+     */
+    public static #ChatTemplate forModel(String modelPath, Tokenizer tok) {
+        GgufFile g #= heap GgufFile(modelPath);
+        String tpl = g.chatTemplate();
+        if (tpl == null) {
+            g.close();
+            return null;
+        }
+        String bosText = "";
+        if (tok.addsBos()) {
+            bosText = "" + ChatOp.tokenText(tok, tok.bosToken());
+        }
+        String eosText = "";
+        int64 eosId = g.metaInt("tokenizer.ggml.eos_token_id", -1L);
+        if (eosId >= 0L) {
+            eosText = "" + ChatOp.tokenText(tok, (int32) eosId);
+        }
+        ChatTemplate t #= ChatTemplate.fromString(tpl, "gguf", bosText,
+            eosText);
+        g.close();
+        return #t;
+    }
+
+    /**
+     * Render a `messages` array (as JSON source text) into a prompt.
+     * Returns null when `t` is null — the caller must turn that into a
+     * protocol error, never into a guessed template.
+     */
+    public static #String render(ChatTemplate t, String messagesJson) {
+        if (t == null) {
+            return null;
+        }
+        return #t.renderJson(messagesJson, null, true);
+    }
+
+    static #String tokenText(Tokenizer tok, int32 id) {
+        int32[] one #= heap int32[1];
+        one[0] = id;
+        int8[] b #= tok.decode(one, 1);
+        String s = heap String(#b, (int32) b.count());
+        return #s;
+    }
+}

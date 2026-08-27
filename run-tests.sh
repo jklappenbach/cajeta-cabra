@@ -86,10 +86,11 @@ else
 fi
 echo ">> engine: $llm_cja"
 
-# cabra's own library .cja first — the engine-repo pattern: a test
-# build over TWO source roots left the second root's types unresolved
-# (2026-08-27), so main sources become an archive and the tests compile
-# against it.
+# cabra's own library .cja first — the engine-repo pattern, and the
+# designed one: a compile reads exactly ONE source root, so main sources
+# become an archive and the tests compile against it via --classpath.
+# (Passing both trees as positionals silently rebound the output dir to
+# a source tree; a hard error in the compiler as of c963d19b.)
 echo ">> building cabra library .cja"
 "$CAJETA" --emit=cja -o "$out/cabra.cja" \
     --classpath="$llm_cja,$codec_cja,$jinja_cja" \

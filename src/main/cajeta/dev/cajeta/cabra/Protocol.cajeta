@@ -1,9 +1,11 @@
 package dev.cajeta.cabra;
 
 import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonArray;
 import cajeta.codec.json.JsonLinesWriter;
 import cajeta.codec.json.JsonObject;
 import cajeta.codec.json.JsonValue;
+import cajeta.collection.ArrayList;
 import cajeta.lang.String;
 
 /**
@@ -105,6 +107,26 @@ public final class Protocol {
         JsonValue sv = o.get("seed");
         if (sv != null && sv.kind() == JsonValue.NUMBER) {
             r.seed = sv.asInt64();
+        }
+        // Halting strings (spec §4.3). Owned copies: the engine holds
+        // these for the life of the request, well past the JsonValue this
+        // line parsed into.
+        JsonValue stv = o.get("stop");
+        if (stv != null && stv.kind() == JsonValue.ARRAY) {
+            JsonArray a = stv.array();
+            ArrayList<String> st = heap ArrayList<String>();
+            int32 i = 0;
+            while (i < a.count()) {
+                JsonValue el = a.get(i);
+                if (el.kind() == JsonValue.STRING) {
+                    String s #= el.asString();
+                    st.add(#s);
+                }
+                i = i + 1;
+            }
+            if (st.count() > 0) {
+                r.stops #= st;
+            }
         }
         return;
     }
