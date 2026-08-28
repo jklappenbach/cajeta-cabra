@@ -41,8 +41,25 @@ resolve() {
     if [[ -d "$repo" ]]; then
         echo ">> building $name from checkout ($repo)"
         ( cd "$repo" && "$CAJETA" build >/dev/null )
-        cja="$(ls -t "$repo"/build/archive/$name-*.cja 2>/dev/null | head -1)"
-        [[ -n "$cja" ]] && { RESOLVED="$cja"; return; }
+        # ASK the build tool where the artifact is, rather than globbing
+        # build/archive/. The glob was `ls -t .../$name-*.cja | head -1`,
+        # which hard-codes a layout the project can now move
+        # (settings.output, build-output-layout §3.3) and picks by mtime,
+        # so a stale .cja from an older version could win a race with the
+        # one just built. The verb reads the dependency's own manifest.
+        #
+        # NO FALLBACK TO THE GLOB ON PURPOSE: a fallback would let this
+        # script keep passing while resolution had quietly stopped going
+        # through the verb, which is the one thing the migration is
+        # supposed to demonstrate. Needs a cajeta carrying `artifact-path`.
+        if ! cja="$( cd "$repo" && "$CAJETA" artifact-path )"; then
+            echo "$name: 'cajeta artifact-path' failed in $repo" >&2
+            echo "  (needs a cajeta with the artifact-path verb; set" \
+                 "CAJETA=<path-to-built-cajeta> to use a local build)" >&2
+            exit 1
+        fi
+        [[ -f "$cja" ]] || { echo "$name: build produced no artifact at $cja" >&2; exit 1; }
+        RESOLVED="$cja"; return
     fi
     ver="$(sed -n 's/.*"'"${name//./\\.}"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
         "$here/cajeta.json" | head -1)"
