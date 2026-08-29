@@ -17,6 +17,50 @@
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 CAJETA="${CAJETA:-cajeta}"
+
+# --- artifact discovery -------------------------------------------------
+# Where a checkout's .cja is. Prefers `cajeta artifact-path`, which reads
+# that project's OWN manifest -- so a project that moves its artifacts with
+# settings.output is followed rather than guessed, and the version comes
+# from details.version instead of whichever file happens to be newest.
+#
+# Falls back to the historical build/archive glob only when the toolchain
+# does not HAVE the verb (it lands after 0.24.0), so this keeps working on
+# an older cajeta and starts using the verb as soon as a newer one is on
+# PATH -- no flag day.
+#
+# The gate is the CAPABILITY, not the outcome. A fallback keyed on "the
+# verb failed" would silently mask a verb that ran and answered wrongly,
+# which is the very failure this replaces; keyed on "the verb is absent",
+# it cannot. An empty result still means "not in this checkout", exactly
+# as the glob did, so callers' registry fallbacks are unchanged.
+cajeta_artifact_path() {
+    local dir="$1" name="$2"
+    local cj="${CAJETA:-${CAJETA_BIN:-cajeta}}"
+    if [[ -z "${_cajeta_has_ap:-}" ]]; then
+        if "$cj" artifact-path --help 2>/dev/null \
+                | grep -q 'artifact-path \[options\]'; then
+            _cajeta_has_ap=yes
+        else
+            _cajeta_has_ap=no
+        fi
+    fi
+    if [[ "$_cajeta_has_ap" == yes ]]; then
+        # Only report a path that EXISTS. The verb answers where the
+        # artifact would be even when nothing has built it, but the glob
+        # this replaces returned empty in that case, and every caller
+        # reads empty as "not in this checkout" and falls back to the
+        # registry. Handing back a path to a missing file instead would
+        # turn that into a confusing compile failure.
+        local p
+        p=$( cd "$dir" 2>/dev/null && "$cj" artifact-path 2>/dev/null ) || return 0
+        [[ -n "$p" && -f "$p" ]] && printf '%s\n' "$p"
+        return 0
+    else
+        ls -t "$dir"/build/archive/"$name"-*.cja 2>/dev/null | head -1
+    fi
+}
+
 XPU_BACKEND="${XPU_BACKEND:-${CAJETA_XPU_BACKEND:-cpu}}"
 echo ">> compile backend: ${XPU_BACKEND}"
 
@@ -41,24 +85,9 @@ resolve() {
     if [[ -d "$repo" ]]; then
         echo ">> building $name from checkout ($repo)"
         ( cd "$repo" && "$CAJETA" build >/dev/null )
-        # ASK the build tool where the artifact is, rather than globbing
-        # build/archive/. The glob was `ls -t .../$name-*.cja | head -1`,
-        # which hard-codes a layout the project can now move
-        # (settings.output, build-output-layout §3.3) and picks by mtime,
-        # so a stale .cja from an older version could win a race with the
-        # one just built. The verb reads the dependency's own manifest.
-        #
-        # NO FALLBACK TO THE GLOB ON PURPOSE: a fallback would let this
-        # script keep passing while resolution had quietly stopped going
-        # through the verb, which is the one thing the migration is
-        # supposed to demonstrate. Needs a cajeta carrying `artifact-path`.
-        if ! cja="$( cd "$repo" && "$CAJETA" artifact-path )"; then
-            echo "$name: 'cajeta artifact-path' failed in $repo" >&2
-            echo "  (needs a cajeta with the artifact-path verb; set" \
-                 "CAJETA=<path-to-built-cajeta> to use a local build)" >&2
-            exit 1
-        fi
-        [[ -f "$cja" ]] || { echo "$name: build produced no artifact at $cja" >&2; exit 1; }
+        cja="$(cajeta_artifact_path "$repo" "$name" 2>/dev/null)"
+        [[ -n "$cja" && -f "$cja" ]] \
+            || { echo "$name: build produced no artifact under $repo" >&2; exit 1; }
         RESOLVED="$cja"; return
     fi
     ver="$(sed -n 's/.*"'"${name//./\\.}"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
