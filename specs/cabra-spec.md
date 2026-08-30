@@ -126,6 +126,33 @@ on top of them.
 - **4.2** EOG tokens never appear in response text or stream chunks.
 - **4.3** Caller-supplied stop strings are honored in addition to the
   EOG set, and reported as `stop`, not `eos`.
+- **4.4** A response also terminates on ERROR, and `error` is a
+  terminating reason alongside `eos`, `stop` and `budget`. Failing after
+  tokens have already streamed is a distinct case from failing before
+  generation starts, and a client that has rendered half an answer needs
+  to be told which happened.
+
+### 4.5 Error kinds
+
+The engine is consumed IN-PROCESS, so its exceptions need no wire
+representation — `LlmException` with a message is right for that boundary
+and does not change. cabra's protocol is the boundary a program acts
+across, so its errors carry a KIND, not just text.
+
+- **4.5.1** When cabra reports an error, it names a kind a client can act
+  on. A message alone can only be displayed.
+- **4.5.2** The kinds distinguish the responses a client can actually
+  make: bad request (fix and resend), capacity (back off and retry),
+  session gone (open a new session, resend context), model mismatch
+  (fatal for this host), internal (report, do not retry).
+- **4.5.3** cabra classifies from structure, never by matching engine
+  exception text. Capacity is already structural — `appendRow` returns
+  false when no block is free, which §6.4 of the engine spec calls the
+  scheduler's signal — and cabra validates its own inputs before
+  submitting. What remains is genuinely internal, which is the correct
+  thing to tell a client anyway.
+- **4.5.4** An error that ends a session says so; an error the session
+  survives leaves it usable for the next turn.
 
 ## 5. Modes, sessions and concurrency
 
@@ -307,11 +334,24 @@ discussion that produced this section:
 
 ## 8. Observability
 
-- **8.1** Per-request: prompt tokens, generated tokens, prefill ms,
-  decode ms, ms/token — in the response's usage block, so an eval
-  driver needs no other instrumentation.
-- **8.2** The route announcements the engine prints (batch-route,
-  prefill mode) go to stderr/log, never into protocol responses.
+- **8.1** cabra logs. It is an application, and `dev.cajeta.logging` is
+  the ecosystem's telemetry lingua franca (Julian, 2026-08-30).
+- **8.2** When the engine records a diagnostic, cabra PULLS it rather than
+  receiving a pushed line (`cajeta-llm-spec` §11.8). cabra then decides
+  what to do with it: log it, drop it, or forward a session's records to
+  the client that owns that session.
+- **8.3** Engine route diagnostics stay DEBUG. They are tuning detail for
+  whoever is measuring the engine, not news for whoever is operating the
+  host, and at INFO they would recreate the console noise the hook exists
+  to prevent.
+- **8.4** cabra's own logs and the engine's records aggregate into ONE
+  stream (`Log.at`, which borrows the process's DI encoder and appender),
+  not two that happen to both reach the console.
+- **8.5** Diagnostics never travel on a protocol stream, and never on
+  stderr. stdout carries protocol; stderr is a severity channel, so route
+  notes arriving there read as faults.
+- **8.6** When a session is created, resumed, expired or evicted, that is
+  visible in the log without enabling per-token detail.
 
 ## 9. Acceptance shape (informal, for the plan)
 
