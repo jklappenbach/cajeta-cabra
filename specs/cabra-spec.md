@@ -127,20 +127,153 @@ on top of them.
 - **4.3** Caller-supplied stop strings are honored in addition to the
   EOG set, and reported as `stop`, not `eos`.
 
-## 5. Sessions and concurrency
+## 5. Modes, sessions and concurrency
 
-- **5.1 DECIDED (Julian): continuous batching**, sequenced. Target: N concurrent
-  in-flight requests multiplexed over the one stdio pipe by `id`,
-  mapped onto the engine scheduler's continuous batching (`--max-seqs`,
-  engine Units 8–11 — built for exactly this and never yet driven by a
-  real multi-client caller). The plan reaches it in two steps: the
-  serial loop first (one request in flight, correctness and protocol
-  pinned), then id-multiplexed batching as its own unit. Conversation
-  STATE stays client-side: each request carries its full context.
-- **5.2** A request beyond capacity queues rather than erroring; a
-  configured queue depth bounds it, and beyond that the server sheds
-  with an explicit "busy" response (`cajeta.io.net.ConnectionLimiter`
-  exists for the socket side).
+**REVISED 2026-08-30 (Julian).** §5.1 previously had cabra multiplexing N
+requests over one stdio pipe by `id`, reached in two staged steps. That
+is extended rather than discarded, and the precise limit matters:
+
+- stdio is a channel between a process and its PARENT. One parent can
+  drive N id-tagged conversations over it against one in-process model —
+  the original §5.1 design, and it works.
+- stdio cannot accept a second CONNECTION. A separate client process
+  cannot join; it can only spawn its own cabra, which costs another
+  model load — 4.9 GB for the 8B, 48 GB for the 72B.
+
+So sharing one loaded model **across independent client processes**
+requires a listening socket. That is what host mode adds, and it is the
+only thing stdio could not have done.
+
+### 5.1 Three modes
+
+- **5.1.1 Embedded.** The model and engine live in cabra's process. One
+  conversation, one model load, no listener. This is what cabra does
+  today.
+- **5.1.2 Host.** cabra loads the model and serves WebSocket clients,
+  each connection carrying one conversation, multiplexed onto the
+  engine's continuous batching.
+- **5.1.3 Client.** cabra connects to a host and drives one conversation.
+- **5.1.4 When a host is running, several client PROCESSES share its one
+  loaded model.** Weights are shared in exactly two arrangements: several
+  conversations driven by one parent over stdio, and several client
+  processes against a host. Anything else costs a load per process.
+
+**The engine has no wire protocol at all.** `dev.cajeta.llm` is a library
+with a function-call API — no listener, no message format, no session
+registry. cabra provides EVERY expression of the contract: stdio for a
+parent process, WebSocket for remote clients, the same op set and the
+same session ids over both. Serving is cabra's job, which is what its
+name has always said, and it keeps the engine embeddable by third parties
+without an HTTP stack in their build graph (§5.6).
+
+### 5.2 Sessions
+
+A **session** is one conversation's state in the engine: its KV slot, its
+sampling parameters, its in-flight turn. **The session id is part of the
+protocol contract** (Julian, 2026-08-30), on every transport.
+
+- **5.2.1** When a client opens a session, it receives a session id, and
+  every subsequent message names the session it belongs to.
+- **5.2.2** A session is NOT bound to a connection. When a client
+  reconnects, it resumes by naming its session id, and the host-side
+  prefix cache is still warm.
+- **5.2.3** When a client closes a session explicitly, its KV slot returns
+  to the pool.
+- **5.2.4** When a session has been idle beyond a configured period, the
+  host expires it and reclaims the slot. Expiry is the only reclamation
+  path for a client that vanished without closing.
+- **5.2.5** When a client names a session that has expired or never
+  existed, it is told so explicitly rather than being given a silently
+  fresh one — the difference matters, because a fresh session means the
+  conversation's context is gone from the cache.
+- **5.2.6** One connection MAY carry several sessions. Nothing requires it,
+  and cabra in client mode drives one, but the contract does not forbid a
+  client that holds several conversations.
+- **5.2.7** Sessions are independent: one session's parameters,
+  cancellation or failure never perturb another's output.
+- **5.2.8** Conversation STATE stays client-side: each request carries its
+  full context, so host-side KV is a cache and never a record. A client
+  that reconnects after a crash resumes by resubmitting; a host that
+  evicts blocks costs latency, never a different answer.
+
+*Why the id rather than the connection.* Binding a session to its
+connection is simpler — no registry, no expiry, no orphans — but it makes
+a dropped connection cost a full re-prefill, and it would leave the two
+transports carrying different op sets, since §3's stdio protocol is
+already id-tagged. The id keeps one protocol across both and makes the
+prefix cache survive a reconnect, which is the whole point of having one.
+
+### 5.3 Concurrency
+
+- **5.3.1** A request beyond capacity queues rather than erroring; a
+  configured queue depth bounds it, and beyond that the host sheds with
+  an explicit "busy" response (`cajeta.io.net.ConnectionLimiter` exists
+  for the socket side).
+- **5.3.2** When a client stops reading, other sessions are not blocked
+  waiting for it.
+
+### 5.4 Transport
+
+- **5.4.1** Host mode speaks WebSocket, over `dev.cajeta.http`, which
+  already implements the handshake, framing, close codes and
+  permessage-deflate.
+- **5.4.2** Embedded mode speaks the §3 stdio protocol. Both carry the
+  same op set.
+- **5.4.3** The serving core is transport-neutral: a transport supplies a
+  message channel — read a message, write a message, close — and the core
+  never branches on which it is running over. An in-memory channel
+  implements the same seam, so the op set and session lifecycle are
+  testable without sockets, pipes or a model.
+
+### 5.5 Authentication
+
+- **5.5.1** When a client connects to a host, it presents a token before
+  any other op is accepted.
+- **5.5.2** The host learns only that the connector holds a valid token,
+  not WHICH client connected. Per-client identity needs peer credentials,
+  and cajeta's stdlib has no `AF_UNIX` — loopback TCP cannot supply them.
+- **5.5.3** The token is modelled as a credential rather than as a shared
+  secret, so it can later carry a client identity that policy keys on
+  (§5.7) without a protocol change.
+- **5.5.4** Embedded mode requires no token: the caller owns the process.
+
+### 5.6 Packaging
+
+- **5.6.1** `dev.cajeta.llm` takes no HTTP dependency. It is the artifact
+  third parties embed, and an inference library that drags HTTP/2 and
+  HPACK into a build is materially harder to adopt.
+- **5.6.2** cabra takes `dev.cajeta.http`. cabra is an application, not a
+  library, so the dependency stops with it.
+- **5.6.3** `dev.cajeta.llm` takes `dev.cajeta.logging`, and that is not
+  the same kind of dependency as §5.6.1's. Logging is cross-cutting
+  infrastructure — the fleet's standard, 158 KB, nothing behind it, and
+  wanted by essentially every application. An HTTP stack is a SERVING
+  capability: large, unrelated to inference, and something an embedder
+  actively does not want in a build. The engine keeps `Diag` as a hook
+  regardless, so the library still chooses no backend and stays silent
+  until an application installs a sink.
+- **5.6.4** Diagnostics go to the log, never to stderr, and never onto a
+  protocol stream. stderr is a severity channel — route notes arriving
+  painted red read as faults — and stdout carries protocol. Host mode
+  strengthens this: a host's own logs and the engine's route diagnostics
+  belong in ONE aggregated stream (`Log.at`), not two.
+
+### 5.7 Guardrails — DEFERRED (Julian, 2026-08-30)
+
+Per-client constraints, permissions, and policy over what a model may make
+the machine do are **out of scope for now**, to be implemented as model
+capabilities become clear rather than designed against a guess.
+
+Consequences worth stating, since they were load-bearing in the
+discussion that produced this section:
+
+- **5.7.1** Without guardrails, the per-client process boundary is no
+  longer a security boundary. What remains is crash isolation, and the
+  fact that any process speaking the protocol can connect.
+- **5.7.2** Where guardrails eventually live — in the host per session, or
+  in each client process — is therefore OPEN. Nothing in §5 forecloses
+  either; §5.5.3 keeps the credential able to carry identity, and the
+  session id (§5.2.1) gives policy something durable to attach to.
 
 ## 6. Prompt cache
 
