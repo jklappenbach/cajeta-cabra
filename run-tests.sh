@@ -113,9 +113,12 @@ resolve() {
 resolve dev.cajeta.unit  "${UNIT_REPO:-$here/../cajeta-unit}";  unit_cja="$RESOLVED"
 resolve dev.cajeta.codec "${CODEC_REPO:-$here/../cajeta-codec}"; codec_cja="$RESOLVED"
 resolve dev.cajeta.jinja "${JINJA_REPO:-$here/../cajeta-jinja}"; jinja_cja="$RESOLVED"
+# The backend the engine's DiagSink seam is bridged onto (LoggingDiagSink).
+resolve dev.cajeta.logging "${LOGGING_REPO:-$here/../cajeta-logging}"; logging_cja="$RESOLVED"
 echo ">> unit: $unit_cja"
 echo ">> codec: $codec_cja"
 echo ">> jinja: $jinja_cja"
+echo ">> logging: $logging_cja"
 
 # The engine: no `cajeta build` task emits its .cja with deps wired, so
 # build it the way its own run-tests.sh does — one --emit=cja over its
@@ -139,12 +142,12 @@ echo ">> engine: $llm_cja"
 # a source tree; a hard error in the compiler as of c963d19b.)
 echo ">> building cabra library .cja"
 "$CAJETA" --emit=cja -o "$out/cabra.cja" \
-    --classpath="$llm_cja,$codec_cja,$jinja_cja" \
+    --classpath="$llm_cja,$codec_cja,$jinja_cja,$logging_cja" \
     dev.cajeta.cabra.Main.main "$here/src/main/cajeta" "$out" >/dev/null
 
 echo ">> building + running the cabra test binary"
 "$CAJETA" --emit=exe --profile=test --xpu-backend="$XPU_BACKEND" \
-    --classpath="$out/cabra.cja,$llm_cja,$unit_cja,$codec_cja,$jinja_cja" \
+    --classpath="$out/cabra.cja,$llm_cja,$unit_cja,$codec_cja,$jinja_cja,$logging_cja" \
     -o "$out/cabratests" \
     dev.cajeta.cabra.selftest.TestMain.run \
     "$here/src/test/cajeta" "$out" >/dev/null

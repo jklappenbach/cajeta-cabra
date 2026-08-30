@@ -35,8 +35,15 @@
         // eogTokens). Dev builds resolve it from the sibling checkout
         // like cajeta-llm's own run-tests.sh resolves codec/jinja; the
         // pin below is for release resolution through olla.
+        //
+        // dev.cajeta.logging is what the engine's `DiagSink` seam is
+        // bridged ONTO (plan boundary revision: the engine declares the
+        // seam, cabra implements it). The engine deliberately does not
+        // depend on a logging backend — picking one is the embedder's
+        // job, and cabra is the embedder.
         "dependencies": {
-            "dev.cajeta.llm": "0.1.0"
+            "dev.cajeta.llm": "0.1.0",
+            "dev.cajeta.logging": "0.6.0"
         },
 
         "dev-dependencies": {

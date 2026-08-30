@@ -6,9 +6,13 @@ import cajeta.io.file.FileWriter;
 import cajeta.lang.Integer;
 import cajeta.lang.String;
 import cajeta.lang.System;
+import dev.cajeta.llm.Diag;
 import dev.cajeta.llm.EngineOptions;
 import dev.cajeta.llm.LlmEngine;
 import dev.cajeta.llm.chat.ChatTemplate;
+import dev.cajeta.logging.Level;
+import dev.cajeta.logging.Log;
+import dev.cajeta.logging.Logger;
 
 /**
  * cabra — the resident-model serving harness (spec §1). A cabra is a
@@ -23,6 +27,27 @@ import dev.cajeta.llm.chat.ChatTemplate;
  */
 public final class Main {
 
+    // The bridge and its logger, OWNED here for the life of the process:
+    // `Diag.setSink` records a BORROW, so whatever it points at must be
+    // held by someone for as long as diagnostics are on.
+    static LoggingDiagSink diagSink;
+
+    /**
+     * Honor `--verbose`: route the engine's route diagnostics into
+     * `dev.cajeta.logging` at DEBUG (see `LoggingDiagSink`).
+     *
+     * Off by default, and off means the engine writes nothing at all —
+     * stdout is protocol-pure and stderr is not a dumping ground.
+     */
+    static void applyDiag(boolean verbose) {
+        if (verbose) {
+            Logger log #= Log.console("cabra.engine", Level.DEBUG);
+            Main.diagSink #= heap LoggingDiagSink(#log);
+            Diag.setSink(Main.diagSink);
+        }
+        return;
+    }
+
     public static int32 main(String[] args) {
         boolean isServe = (int32) args.count() >= 1
             && args[0].equals("serve");
@@ -34,6 +59,7 @@ public final class Main {
         int32 ctx = 512;
         int32 maxSeqs = 1;
         String device = "";
+        boolean verbose = false;
         int32 i = 1;
         while (i < (int32) args.count()) {
             String a = args[i];
@@ -51,6 +77,10 @@ public final class Main {
                     && i + 1 < (int32) args.count()) {
                 i = i + 1;
                 device = args[i];
+            } else if (a.equals("--verbose")) {
+                // A BARE toggle — unlike every flag above it, this one
+                // takes no value, so it must not advance `i`.
+                verbose = true;
             } else {
                 System.stderr.println("cabra: unknown argument " + a);
                 Main.usage();
@@ -63,6 +93,7 @@ public final class Main {
             return 2;
         }
 
+        Main.applyDiag(verbose);
         System.stderr.println("cabra: loading " + model);
         EngineOptions opts = heap EngineOptions(model);
         opts.ctx = ctx;
@@ -116,7 +147,10 @@ public final class Main {
 
     static void usage() {
         System.stderr.println("usage: cabra serve --model <path> "
-            + "[--ctx N] [--max-seqs N] [--device <backend>]");
+            + "[--ctx N] [--max-seqs N] [--device <backend>] "
+            + "[--verbose]");
+        System.stderr.println("  --verbose  engine route diagnostics to "
+            + "the log at DEBUG");
         System.stderr.println("  JSONL on stdin -> JSONL on stdout; "
             + "logs on stderr; EOF or {\"op\":\"shutdown\"} exits");
         return;
