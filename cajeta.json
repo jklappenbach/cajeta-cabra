@@ -43,7 +43,7 @@
         // job, and cabra is the embedder.
         "dependencies": {
             "dev.cajeta.llm": "0.1.0",
-            "dev.cajeta.logging": "0.6.0"
+            "dev.cajeta.logging": "0.7.0"
         },
 
         "dev-dependencies": {

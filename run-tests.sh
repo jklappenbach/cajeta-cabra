@@ -122,12 +122,15 @@ echo ">> logging: $logging_cja"
 
 # The engine: no `cajeta build` task emits its .cja with deps wired, so
 # build it the way its own run-tests.sh does — one --emit=cja over its
-# main sources with codec+jinja on the classpath.
+# main sources with codec+jinja+logging on the classpath. logging is
+# there because the engine's CLI bridges Diag onto it (2026-08-30);
+# omitting it fails as `unknown field type 'Logger'` when the engine's
+# own sources are compiled here rather than resolved as an archive.
 LLM_REPO="${LLM_REPO:-$here/../cajeta-llm}"
 if [[ -d "$LLM_REPO" ]]; then
     echo ">> building dev.cajeta.llm from checkout ($LLM_REPO)"
     "$CAJETA" --emit=cja -o "$out/llm.cja" \
-        --classpath="$codec_cja,$jinja_cja" \
+        --classpath="$codec_cja,$jinja_cja,$logging_cja" \
         dev.cajeta.llm.Llm.run "$LLM_REPO/src/main/cajeta" "$out" >/dev/null
     llm_cja="$out/llm.cja"
 else
