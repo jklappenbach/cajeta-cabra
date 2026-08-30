@@ -286,3 +286,141 @@ both route through it.
 
 ### 5.3 Acceptance
 - [ ] 5.3.1 Julian drives a session against the 72B through cabra.
+
+---
+
+## 6. Session model and the transport-neutral core
+
+*Satisfies spec §4.4, §4.5, §5.2, §5.4.3. Depends on nothing; everything
+here is testable without a socket, a pipe or a model.*
+
+### 6.1 TDD
+- [ ] 6.1.1 An opened session returns an id, and a message naming it is
+      routed to it.
+- [ ] 6.1.2 A session survives its connection: closing and reattaching by
+      id reaches the same session, with its context still warm.
+- [ ] 6.1.3 A message naming an expired or unknown session is refused
+      explicitly, NOT given a silently fresh one (§5.2.5) — a client that
+      cannot tell the difference will assume its context is cached when
+      it is gone.
+- [ ] 6.1.4 An idle session past its expiry is reclaimed, and its slot
+      returns to the pool.
+- [ ] 6.1.5 Two sessions on one channel do not perturb each other's
+      output, cancellation or parameters.
+- [ ] 6.1.6 Each error kind (§4.5.2) is produced by the condition that
+      should produce it, and carries its kind rather than only text.
+- [ ] 6.1.7 An error AFTER tokens have streamed terminates the turn with
+      reason `error`, distinguishably from one before generation starts.
+- [ ] 6.1.8 NEGATIVE ARM: classification never reads engine exception
+      text. Change an `LlmException` message and every kind still
+      resolves the same way.
+
+### 6.2 Coding
+- [ ] 6.2.1 The channel seam: read a message, write a message, close.
+- [ ] 6.2.2 An in-memory channel implementing it, so 6.1.* run with no
+      I/O.
+- [ ] 6.2.3 Session registry: open, resume by id, close, expire.
+- [ ] 6.2.4 Error kinds and the `error` terminating reason.
+- [ ] 6.2.5 The serving core, transport-blind: it never branches on which
+      transport carries it.
+
+### 6.3 Acceptance
+- [ ] 6.3.1 The whole unit runs without a model, a socket or a pipe.
+- [ ] 6.3.2 The stdio transport (§3) is re-expressed over the seam with
+      its behaviour unchanged — same op set, same ids.
+
+## 7. Host mode over WebSocket
+
+*Satisfies spec §5.1.2, §5.3, §5.4.1, §5.5. Depends on unit 6.*
+**BLOCKED until `cajeta-llm-plan` 15.2.8 is fixed** — host mode is N
+concurrent sequences in one engine, and the engine crashes above one at
+the default chunk.
+
+### 7.1 TDD
+- [ ] 7.1.1 Two clients connected at once each get their own session and
+      their own output.
+- [ ] 7.1.2 Two clients share ONE model load — the measurement that
+      justifies host mode at all (§5.1.4).
+- [ ] 7.1.3 A client that dies without closing has its session reclaimed
+      by expiry, not leaked.
+- [ ] 7.1.4 A connection without a valid token is closed before any other
+      op is processed.
+- [ ] 7.1.5 Beyond capacity, a request queues and later runs; beyond the
+      queue bound it is shed with an explicit busy error.
+- [ ] 7.1.6 A client that stops reading does not stall other sessions.
+
+### 7.2 Coding
+- [ ] 7.2.1 A WebSocket channel over `dev.cajeta.http` implementing the
+      unit-6 seam.
+- [ ] 7.2.2 Listener, accept loop, per-connection session binding.
+- [ ] 7.2.3 Token check on connect.
+- [ ] 7.2.4 Capacity, queue bound and shedding.
+
+### 7.3 Acceptance
+- [ ] 7.3.1 N terminals against one host produce N conversations from one
+      resident model, with resident memory close to a single load rather
+      than N.
+
+## 8. Client mode
+
+*Satisfies spec §5.1.3. Depends on unit 7.*
+
+### 8.1 TDD
+- [ ] 8.1.1 cabra connects to a host and drives one conversation.
+- [ ] 8.1.2 A dropped connection resumes the SAME session by id, and the
+      prefix cache is still warm — measured as a re-prefill that does not
+      happen, not merely as a successful reconnect.
+- [ ] 8.1.3 Connecting to no host fails with a clear message and does not
+      silently start one (spec: no implicit server start).
+
+### 8.2 Coding
+- [ ] 8.2.1 Client-side channel and session handling.
+- [ ] 8.2.2 `--connect` on the existing verbs.
+
+### 8.3 Acceptance
+- [ ] 8.3.1 The same conversation behaves identically embedded and
+      connected, apart from latency.
+
+## 9. Diagnostics as records
+
+*Satisfies spec §8.2. Depends on the engine's `cajeta-llm-plan` §11.8
+callback landing first.*
+
+### 9.1 TDD
+- [ ] 9.1.1 Records arrive attributed to the session that produced them,
+      with two sessions in flight — the case the current text stream
+      cannot express at all.
+- [ ] 9.1.2 A handler that throws does not take the turn down.
+- [ ] 9.1.3 A slow handler is not on the token path: the handler enqueues
+      and returns, and per-token latency is unchanged with a deliberately
+      slow consumer attached.
+- [ ] 9.1.4 With no callback registered, nothing is recorded and no
+      string is formatted.
+
+### 9.2 Coding
+- [ ] 9.2.1 Register a callback with the engine; take the record, return.
+- [ ] 9.2.2 Publish off the engine's thread: log, and optionally forward a
+      session's records to the client that owns it.
+- [ ] 9.2.3 Any retrospective buffer cabra wants is cabra's, sized by
+      cabra's policy (§8.2.2).
+
+### 9.3 Acceptance
+- [ ] 9.3.1 A route decision taken during one client's turn is visible in
+      cabra's log attributed to that client's session.
+
+## 10. The multi-client 72B acceptance
+
+*Satisfies spec §5.1.4. Depends on units 7–9.*
+
+### 10.1 TDD
+- [ ] 10.1.1 (manual, recorded here) Three clients against one 72B host:
+      each completes, outputs are per-client correct, and resident memory
+      is one model load rather than three.
+
+### 10.2 Coding
+- [ ] 10.2.1 `docs/protocol.md` gains the session ops, error kinds and
+      the WebSocket transport.
+
+### 10.3 Acceptance
+- [ ] 10.3.1 Julian drives three concurrent conversations against one
+      resident 72B.
