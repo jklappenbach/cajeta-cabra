@@ -336,10 +336,17 @@ discussion that produced this section:
 
 - **8.1** cabra logs. It is an application, and `dev.cajeta.logging` is
   the ecosystem's telemetry lingua franca (Julian, 2026-08-30).
-- **8.2** When the engine records a diagnostic, cabra PULLS it rather than
-  receiving a pushed line (`cajeta-llm-spec` §11.8). cabra then decides
-  what to do with it: log it, drop it, or forward a session's records to
-  the client that owns that session.
+- **8.2** cabra registers a diagnostics callback with the engine and
+  receives structured, session-attributed records as they occur
+  (`cajeta-llm-spec` §11.8). cabra decides what to do with each: log it,
+  drop it, or forward a session's records to the client that owns it.
+- **8.2.1** The callback runs on the engine's thread mid-generation, so
+  cabra's handler takes the record and returns. Any formatting or I/O
+  happens on cabra's own thread; work done in the handler is latency on
+  every token.
+- **8.2.2** If cabra wants retrospective queries — "what did that turn
+  do?" after it finished — cabra keeps the buffer. The engine holds none,
+  because how much history to keep is cabra's policy, not the engine's.
 - **8.3** Engine route diagnostics stay DEBUG. They are tuning detail for
   whoever is measuring the engine, not news for whoever is operating the
   host, and at INFO they would recreate the console noise the hook exists
