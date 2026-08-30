@@ -41,7 +41,13 @@ public final class Main {
      */
     static void applyDiag(boolean verbose) {
         if (verbose) {
-            Logger log #= Log.console("cabra.engine", Level.DEBUG);
+            // Log.at, NOT Log.console: `console` builds its OWN
+            // ConsoleAppender per call, so the engine's diagnostics would
+            // run as a SECOND stream beside cabra's own logs and would
+            // stop following the moment a file sink is configured. `at`
+            // borrows the process's DI encoder+appender, so both
+            // aggregate into one stream (Julian, 2026-08-30).
+            Logger log #= Log.at("cabra.engine", Level.DEBUG);
             Main.diagSink #= heap LoggingDiagSink(#log);
             Diag.setSink(Main.diagSink);
         }
