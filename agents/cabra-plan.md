@@ -187,7 +187,7 @@ both route through it.
       object, never a hang and never a dropped line.
 
 ### 4.2 Coding
-- [~] 4.2.1 Reader thread feeding a request queue; the serve loop
+- [ ] 4.2.1 Reader thread feeding a request queue; the serve loop
       drives `stepOnce` across all in-flight requests (the scheduler's
       continuous batching — its first real multi-client caller).
       **The drive half is DONE** — `handleLine` submits, `drive()` steps
@@ -205,6 +205,61 @@ both route through it.
       lend-not-own slot rule for heap T), main fiber does every engine
       call. Needs one of: non-blocking/`poll`-able stdin, an
       interruptible read, or a stdin reader on a real carrier thread.
+
+      **REVISED 2026-08-30 — (a) is inaccurate as written.** The runtime
+      already HAS a portable single-fd readiness probe that works on any
+      POSIX fd, stdin included: `__cajeta_net_reactor_poll_fd`, built on
+      `select()` (`runtime/native/cajeta_net_reactor.c`), with a
+      cooperative `Reactor.pollPark(fd, READ)` that yields to other
+      fibers instead of blocking the carrier. Measured 2026-08-30:
+      `select()` on fd 0 of a pipe correctly reports not-ready with no
+      data pending. The capability is not MISSING, it is UNEXPOSED —
+      every member of `Reactor` is package-private to
+      `cajeta.io.net.reactor`, so cabra cannot reach it.
+
+      **UNBLOCKED 2026-08-30 — both (a) and (b) are now measured, not
+      argued.** `FileReader.awaitReadable(int32 timeoutMs)` shipped in
+      cajeta main (`ffd03571`); see the archived `pollable-stdin` spec +
+      plan. What it settles, and how each was established:
+        * (a) is RESOLVED, not merely inaccurate. `awaitReadable` polls
+          and parks cooperatively, so a reader fiber never enters a
+          blocking `read` and never stalls its carrier. A regular file
+          reports ALWAYS-READY by design, so `cabra serve < reqs.jsonl`
+          behaves like a pipe. Windows THROWS, documented: Winsock
+          `select()` takes only SOCKETs and a console/pipe HANDLE is not
+          one — so cabra's reader half is POSIX-only until a native
+          `PeekNamedPipe`/`WaitForSingleObject` path exists. Plan for
+          that now rather than discovering it on the mingw leg.
+        * (b) is RESOLVED BY MEASUREMENT, which matters because the
+          pollable-stdin spec had only ARGUED it away ("the park is
+          itself a yield point"). `FileReaderAwaitCancelTests` parks a
+          waiter for 5s on an idle pipe and cancels at 300ms: it drains
+          in under 2s, so `Cajeta.fiberSleepNanos` DOES observe the
+          cancellation. Its control (`withTimeoutDrainsABodyThatCannot
+          Yield`, a 3s spin with no yield point) takes the full 3s,
+          which is what makes the short time mean anything. So
+          `{"op":"shutdown"}` will NOT hang at the `scope` join.
+        * READINESS IS BYTES, NOT LINES. `awaitReadable` says only that
+          a read will not block; a read can land mid-line. The ring-of-
+          slots sketch below still needs the caller to carry a partial
+          tail across passes — see the worked loop in the method's
+          docstring, which `FileReaderAwaitDocExampleTests` executes.
+
+      (b) then dissolves as a consequence: a reader that waits via
+      poll-and-park never parks inside a blocking `read`, so there is
+      nothing to cancel — the park IS a yield point, and shutdown joins
+      cleanly.
+
+      Two real caveats remain, and they are what the fix must address:
+      1. Readiness is >=1 BYTE, not a whole line, so a client that
+         writes a partial line can still stall a `readLine`. Needs
+         incremental buffering, not just a poll.
+      2. WINDOWS: Winsock `select()` accepts only SOCKETs, and a console
+         or pipe HANDLE is not one — so this route is POSIX-only unless
+         a Windows path is written.
+
+      So the blocker is now a stdlib API decision (what to expose, and
+      what Windows does), not a missing runtime capability.
 - [x] 4.2.2 Per-request sink demux by scheduler request id → caller id.
 
 ### 4.3 Acceptance
