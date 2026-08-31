@@ -115,6 +115,8 @@ resolve dev.cajeta.codec "${CODEC_REPO:-$here/../cajeta-codec}"; codec_cja="$RES
 resolve dev.cajeta.jinja "${JINJA_REPO:-$here/../cajeta-jinja}"; jinja_cja="$RESOLVED"
 # The backend the engine's DiagSink seam is bridged onto (LoggingDiagSink).
 resolve dev.cajeta.logging "${LOGGING_REPO:-$here/../cajeta-logging}"; logging_cja="$RESOLVED"
+# Host mode (unit 7): the WebSocket stack.
+resolve dev.cajeta.http "${HTTP_REPO:-$here/../cajeta-http}"; http_cja="$RESOLVED"
 echo ">> unit: $unit_cja"
 echo ">> codec: $codec_cja"
 echo ">> jinja: $jinja_cja"
@@ -145,12 +147,12 @@ echo ">> engine: $llm_cja"
 # a source tree; a hard error in the compiler as of c963d19b.)
 echo ">> building cabra library .cja"
 "$CAJETA" --emit=cja -o "$out/cabra.cja" \
-    --classpath="$llm_cja,$codec_cja,$jinja_cja,$logging_cja" \
+    --classpath="$llm_cja,$codec_cja,$jinja_cja,$logging_cja,$http_cja" \
     dev.cajeta.cabra.Main.main "$here/src/main/cajeta" "$out" >/dev/null
 
 echo ">> building + running the cabra test binary"
 "$CAJETA" --emit=exe --profile=test --xpu-backend="$XPU_BACKEND" \
-    --classpath="$out/cabra.cja,$llm_cja,$unit_cja,$codec_cja,$jinja_cja,$logging_cja" \
+    --classpath="$out/cabra.cja,$llm_cja,$unit_cja,$codec_cja,$jinja_cja,$logging_cja,$http_cja" \
     -o "$out/cabratests" \
     dev.cajeta.cabra.selftest.TestMain.run \
     "$here/src/test/cajeta" "$out" >/dev/null

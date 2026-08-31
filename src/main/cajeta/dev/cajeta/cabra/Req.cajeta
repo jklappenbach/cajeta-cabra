@@ -28,6 +28,9 @@ public final class Req {
     public boolean hasSession;
     public int64 session;
 
+    // Host-mode auth (spec 5.5.1): the token presented on connect.
+    public String token;
+
     public String prompt;      // generate
     public String messagesRaw; // chat: the messages array re-serialized
 
@@ -56,6 +59,7 @@ public final class Req {
         this.id = 0L;
         this.hasSession = false;
         this.session = 0L;
+        this.token = "";
         this.prompt = "";
         this.messagesRaw = "";
         this.n = 256;

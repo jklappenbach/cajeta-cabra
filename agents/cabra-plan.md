@@ -381,11 +381,31 @@ the default chunk.
 - [ ] 7.1.6 A client that stops reading does not stall other sessions.
 
 ### 7.2 Coding
-- [ ] 7.2.1 A WebSocket channel over `dev.cajeta.http` implementing the
+- [x] 7.2.1 A WebSocket channel over `dev.cajeta.http` implementing the
       unit-6 seam.
-- [ ] 7.2.2 Listener, accept loop, per-connection session binding.
-- [ ] 7.2.3 Token check on connect.
+- [x] 7.2.2 Listener, accept loop, per-connection session binding.
+- [x] 7.2.3 Token check on connect.
 - [ ] 7.2.4 Capacity, queue bound and shedding.
+
+
+**Unit 7 status 2026-08-31 — BLOCKED on a runtime lost-wake bug.**
+Landed: Host + WsConn (accept fiber, per-conn reader/writer fibers with
+bounded outbox + shed, auth gate, unit-6 sessions, Serve-style demux
+with a connection column). The SINGLE-client path is proven live end to
+end (tools/repro/HostProbe.cajeta, cpu + vulkan: connect, upgrade,
+auth, open, streamed generate, shutdown, exit 0). The TWO-client path
+wedges 100% deterministically in the RUNTIME, not in cabra: at wedge
+every thread is parked (main + 6 carriers futex_wait, reactor ep_poll)
+while fully FLUSHED ws frames sit unread on the client sockets — the
+reactor-woken fibers are never resumed by any carrier. A println in
+the dispatch path masks it (scheduling side effect); a forced 1 ms
+main park per step does NOT (so not starvation — a dropped wake).
+Repro: build tools/repro/HostProbe.cajeta against cabra.cja (any
+backend) and run; wedges after both generates dispatch. HostTest.cajeta
+carries the suite-side tests, currently wedging the suite — REMOVE it
+from the tree until the runtime fix, then restore. Compiler-side next:
+the EPOLLONESHOT wake -> carrier ready-deque handoff in
+cajeta_net_reactor.c / the carrier futex wake.
 
 ### 7.3 Acceptance
 - [ ] 7.3.1 N terminals against one host produce N conversations from one

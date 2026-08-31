@@ -58,6 +58,15 @@ public final class Protocol {
             r.session = sv0.asInt64();
         }
 
+        if (op.equals("auth")) {
+            JsonValue tv0 = o.get("token");
+            if (tv0 != null && tv0.kind() == JsonValue.STRING) {
+                String tk #= tv0.asString();
+                r.token = tk;
+            }
+            r.ok = true;
+            return #r;
+        }
         if (op.equals("health") || op.equals("shutdown")
                 || op.equals("open") || op.equals("close")) {
             r.ok = true;

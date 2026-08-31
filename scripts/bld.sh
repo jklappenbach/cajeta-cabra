@@ -25,6 +25,8 @@ CODEC="${CODEC:-$here/../cajeta-codec/build/archive/dev.cajeta.codec-$codec_ver.
 JINJA="${JINJA:-$here/../cajeta-jinja/build/archive/dev.cajeta.jinja-$jinja_ver.cja}"
 logging_ver="$(sed -n 's/.*"dev\.cajeta\.logging"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$here/cajeta.json" | head -1)"
 LOGGING="${LOGGING:-$here/../cajeta-logging/build/archive/dev.cajeta.logging-$logging_ver.cja}"
+http_ver="$(sed -n 's/.*"dev\.cajeta\.http"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$here/cajeta.json" | head -1)"
+HTTP="${HTTP:-$here/../cajeta-http/build/archive/dev.cajeta.http-$http_ver.cja}"
 LLM_SRC="${LLM_SRC:-$here/../cajeta-llm/src/main/cajeta}"
 
 mkdir -p "$here/tmp"
@@ -45,7 +47,7 @@ LOG="$here/tmp/bld-$(basename "$OUT").log"
     --classpath="$CODEC,$JINJA,$LOGGING" \
     dev.cajeta.llm.Llm.run "$LLM_SRC" "$here/tmp" > "$LOG" 2>&1
 "$CAJETA" --emit=exe --release --xpu-backend="$BE" \
-    --classpath="$here/tmp/llm-$BE.cja,$CODEC,$JINJA,$LOGGING" \
+    --classpath="$here/tmp/llm-$BE.cja,$CODEC,$JINJA,$LOGGING,$HTTP" \
     -o "$OUT" dev.cajeta.cabra.Main.main \
     "$here/src/main/cajeta" "$here/tmp" >> "$LOG" 2>&1
 rc=$?

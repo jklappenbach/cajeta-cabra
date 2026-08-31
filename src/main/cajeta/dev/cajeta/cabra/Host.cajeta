@@ -1,0 +1,418 @@
+package dev.cajeta.cabra;
+
+import cajeta.collection.ArrayList;
+import cajeta.concurrent.Channel;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.lang.Optional;
+import cajeta.lang.String;
+import cajeta.time.Clock;
+import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.llm.gen.SampleParams;
+import dev.cajeta.llm.gen.TokenSink;
+import dev.cajeta.llm.sched.Request;
+
+/**
+ * Host mode (spec §5.1.2, plan unit 7): one loaded model, N WebSocket
+ * clients, every conversation multiplexed onto the engine's continuous
+ * batching. The thread/fiber layout:
+ *
+ *   accept fiber      — accepts sockets, binds a `WsConn`, spawns its
+ *                       reader (which upgrades and, on success, spawns
+ *                       that connection's writer).
+ *   per-conn reader   — inbound frames -> the shared signal channel.
+ *   per-conn writer   — drains that connection's bounded outbox, so a
+ *                       peer that stops reading stalls only itself
+ *                       (§5.3.2); past the bound the connection sheds.
+ *   host loop         — THIS thread: every engine call. Drains
+ *                       signals, resolves sessions (unit 6 registry),
+ *                       submits turns, steps the scheduler, and routes
+ *                       each chunk by rid -> conn (the Serve demux with
+ *                       a connection column).
+ *
+ * Sessions are identity + expiry only (§5.2.8): host-side KV is a
+ * cache via the engine's prefix store, never pinned per session, so a
+ * reconnect resumes by id and pays at most a warm re-prefill.
+ */
+public final class Host implements TokenSink {
+
+    LlmEngine engine;          // owned
+    SessionRegistry reg;       // owned
+    String token;              // "" = auth disabled
+    String state;
+
+    int32 maxConns;
+    WsConn[] conns;            // slot-indexed; null = free
+    Channel<int64> inCh;       // (connSlot << 16) | lineSlot
+    TcpListener listener;      // owned
+    public int32 port;
+    boolean stopping;
+    Task<int32> acceptTask;
+
+    // In-flight table: the Serve demux plus the connection column.
+    int32 cap;
+    int32 live;
+    int32[] trRid;
+    int64[] trId;
+    int32[] trConn;
+    int32[] trPromptLen;
+    boolean[] trOpen;
+    int32 idleSteps;
+
+    public Host(#LlmEngine engine, String token, int32 maxConns,
+            int32 maxSessions, int64 idleExpiryMs) {
+        this.engine #= engine;
+        this.reg = heap SessionRegistry(maxSessions, idleExpiryMs);
+        this.token = token;
+        this.state = "ready";
+        this.maxConns = maxConns;
+        this.conns #= heap WsConn[maxConns];
+        this.inCh = heap Channel<int64>(64);
+        this.listener = null;
+        this.port = 0;
+        this.stopping = false;
+        this.cap = maxSessions;
+        this.live = 0;
+        this.trRid = heap int32[this.cap];
+        this.trId = heap int64[this.cap];
+        this.trConn = heap int32[this.cap];
+        this.trPromptLen = heap int32[this.cap];
+        this.trOpen = heap boolean[this.cap];
+        this.idleSteps = 0;
+        this.engine.setSink(this);
+        return;
+    }
+
+    /** Bind the listener on loopback:`port` (0 = ephemeral) and spawn
+     *  the accept fiber. `port` reports what was bound. */
+    public void listen(int32 port) {
+        IpAddress la #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#la, port);
+        this.listener = TcpListener.bind(addr);
+        this.port = this.listener.boundPort();
+        Task<int32> t = spawn acceptLoop(this);
+        this.acceptTask #= t;
+        return;
+    }
+
+    static async int32 acceptLoop(Host h) {
+        while (!h.stopping) {
+            TcpStream s = null;
+            try {
+                s #= h.listener.acceptAsync();
+            } catch (Exception e) {
+                break;
+            }
+            int32 slot = h.freeConnSlot();
+            if (slot < 0) {
+                // Beyond connection capacity: shed at the door.
+                s.close();
+                continue;
+            }
+            WsConn c = heap WsConn(slot, #s);
+            h.conns[slot] #= c;
+            WsConn.startRead(h.conns[slot], h);
+        }
+        return 0;
+    }
+
+    int32 freeConnSlot() {
+        int32 i = 0;
+        while (i < this.maxConns) {
+            if (this.conns[i] == null || this.conns[i].dead) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+
+    /** Reader fibers: signal one inbound line. */
+    public void inbound(int32 connSlot, int32 lineSlot) {
+        this.inCh.send(((int64) connSlot << 16) | (int64) lineSlot);
+        return;
+    }
+
+    /** Reader fibers: the connection ended. Sessions SURVIVE (§5.2.2);
+     *  only the connection slot is reclaimed, by the accept loop. */
+    public void connGone(int32 connSlot) {
+        return;
+    }
+
+    void say(int32 connSlot, String m) {
+        WsConn c = this.conns[connSlot];
+        if (c == null || c.dead) {
+            return;
+        }
+        if (!c.enqueueOut(m)) {
+            // §5.3.2: a full outbox means a client that stopped
+            // reading; shed it rather than wait on it.
+            c.dead = true;
+        }
+        return;
+    }
+
+    /** The host loop — run on the main thread until shutdown. */
+    public void run() {
+        while (!this.stopping) {
+            if (this.live > 0) {
+                this.driveStep();
+                boolean absorbing = true;
+                while (absorbing) {
+                    Optional<int64> got = this.inCh.tryReceive();
+                    if (got.isPresent()) {
+                        this.dispatch(got.get());
+                    } else {
+                        absorbing = false;
+                    }
+                }
+            } else {
+                Optional<int64> got = this.inCh.receive();
+                if (got.isEmpty()) {
+                    return;
+                }
+                this.dispatch(got.get());
+            }
+        }
+        return;
+    }
+
+    void dispatch(int64 sig) {
+        int32 connSlot = (int32) (sig >> 16);
+        int32 lineSlot = (int32) (sig & 65535L);
+        WsConn c = this.conns[connSlot];
+        if (c == null || c.dead) {
+            return;
+        }
+        String line = c.inLineAt(lineSlot);
+        int64 nowMs = Clock.nanoTime() / 1000000L;
+        this.reg.expire(nowMs);
+        Req r #= Protocol.parseLine(line);
+
+        // 7.2.3: a token check gates EVERYTHING on an unauthed
+        // connection — close before any other op is processed (7.1.4).
+        if (!c.authed && this.token.byteLength() > 0) {
+            if (r.ok && r.op.equals("auth")
+                    && r.token.equals(this.token)) {
+                c.authed = true;
+                this.say(connSlot, "{\"authed\":true}");
+                return;
+            }
+            c.dead = true;
+            return;
+        }
+
+        if (!r.ok) {
+            String m #= Wire.error(r.id, r.hasId, ErrKind.BAD_REQUEST,
+                r.err, false);
+            this.say(connSlot, m);
+            return;
+        }
+        if (r.op.equals("auth")) {
+            this.say(connSlot, "{\"authed\":true}");
+            return;
+        }
+        if (r.op.equals("shutdown")) {
+            this.stopping = true;
+            return;
+        }
+        if (r.op.equals("health")) {
+            String m #= Wire.health(r.id, this.state, "");
+            this.say(connSlot, m);
+            return;
+        }
+        if (r.op.equals("open")) {
+            int64 sid = this.reg.open(nowMs);
+            if (sid < 0L) {
+                String m #= Wire.error(r.id, r.hasId, ErrKind.CAPACITY,
+                    "no session slot free", false);
+                this.say(connSlot, m);
+                return;
+            }
+            String m #= Wire.opened(r.id, sid);
+            this.say(connSlot, m);
+            return;
+        }
+        if (r.op.equals("close")) {
+            if (!r.hasSession || !this.reg.close(r.session)) {
+                String m #= Wire.error(r.id, r.hasId,
+                    ErrKind.SESSION_GONE, "close: no such open session",
+                    false);
+                this.say(connSlot, m);
+                return;
+            }
+            String m #= Wire.closedOk(r.id, r.session);
+            this.say(connSlot, m);
+            return;
+        }
+
+        // generate / chat.
+        if (r.hasSession) {
+            int32 st = this.reg.touch(r.session, nowMs);
+            if (st != SessionRegistry.OPEN) {
+                String why = st == SessionRegistry.GONE
+                    ? "session expired or closed - open a new one and resend context"
+                    : "unknown session id - never issued by this host";
+                String m #= Wire.error(r.id, r.hasId,
+                    ErrKind.SESSION_GONE, why, true);
+                this.say(connSlot, m);
+                return;
+            }
+        }
+        this.submitOne(connSlot, r);
+        return;
+    }
+
+    void submitOne(int32 connSlot, Req r) {
+        int32[] ids #= this.engine.tokenizer().encodePrompt(r.prompt);
+        int32 n = (int32) ids.count();
+        int32 slot = this.freeReqSlot();
+        if (slot < 0) {
+            String m #= Wire.error(r.id, r.hasId, ErrKind.CAPACITY,
+                "server busy: " + this.live + " requests in flight",
+                false);
+            this.say(connSlot, m);
+            return;
+        }
+        SampleParams p = heap SampleParams(r.temp, r.seed);
+        p.topK = r.topK;
+        p.topP = r.topP;
+        p.repeatPenalty = r.repeatPenalty;
+        int32 rid = 0;
+        try {
+            rid = this.engine.submitTokens(ids, n, r.n, #p);
+        } catch (Throwable t) {
+            String m #= Wire.error(r.id, r.hasId, ErrKind.INTERNAL,
+                "submit failed", false);
+            this.say(connSlot, m);
+            return;
+        }
+        this.trRid[slot] = rid;
+        this.trId[slot] = r.id;
+        this.trConn[slot] = connSlot;
+        this.trPromptLen[slot] = n;
+        this.trOpen[slot] = true;
+        this.live = this.live + 1;
+        return;
+    }
+
+    int32 freeReqSlot() {
+        int32 i = 0;
+        while (i < this.cap) {
+            if (!this.trOpen[i]) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+
+    void driveStep() {
+        if (this.live == 0) {
+            this.idleSteps = 0;
+            return;
+        }
+        try {
+            this.engine.stepOnce();
+        } catch (Throwable t) {
+            this.failAllOpen();
+            return;
+        }
+        int32 done = this.reapFinished();
+        if (done > 0) {
+            this.idleSteps = 0;
+        } else {
+            this.idleSteps = this.idleSteps + 1;
+            if (this.idleSteps > 4096) {
+                this.failAllOpen();
+                this.idleSteps = 0;
+            }
+        }
+        return;
+    }
+
+    int32 reapFinished() {
+        int32 done = 0;
+        int32 i = 0;
+        while (i < this.cap) {
+            if (this.trOpen[i]) {
+                Request q = this.engine.request(this.trRid[i]);
+                if (q.finishReason() != Request.FINISH_NONE) {
+                    String finish = "budget";
+                    if (q.finishReason() == Request.FINISH_EOS) {
+                        finish = "eos";
+                    }
+                    if (q.finishReason() == Request.FINISH_STOP) {
+                        finish = "stop";
+                    }
+                    String m #= Wire.done(this.trId[i], finish);
+                    this.say(this.trConn[i], m);
+                    this.trOpen[i] = false;
+                    this.live = this.live - 1;
+                    done = done + 1;
+                }
+            }
+            i = i + 1;
+        }
+        return done;
+    }
+
+    void failAllOpen() {
+        int32 i = 0;
+        while (i < this.cap) {
+            if (this.trOpen[i]) {
+                String m #= Wire.done(this.trId[i], "error");
+                this.say(this.trConn[i], m);
+                this.trOpen[i] = false;
+            }
+            i = i + 1;
+        }
+        this.live = 0;
+        return;
+    }
+
+    /** TokenSink: rid -> (wireId, conn); decode one token, enqueue. */
+    public void onToken(int32 reqId, int32 tok) {
+        if (this.engine.isEog(tok)) {
+            return;
+        }
+        int32 i = 0;
+        while (i < this.cap) {
+            if (this.trOpen[i] && this.trRid[i] == reqId) {
+                int32[] one #= heap int32[1];
+                one[0] = tok;
+                int8[] b #= this.engine.tokenizer().decode(one, 1);
+                String s = heap String(#b, (int32) b.count());
+                String m #= Wire.chunk(this.trId[i], s);
+                this.say(this.trConn[i], m);
+                return;
+            }
+            i = i + 1;
+        }
+        return;
+    }
+
+    /** Stop: end the accept loop and every connection's fibers. */
+    public void shutdown() {
+        this.stopping = true;
+        if (this.listener != null) {
+            this.listener.close();
+        }
+        int32 i = 0;
+        while (i < this.maxConns) {
+            WsConn c = this.conns[i];
+            if (c != null) {
+                c.dead = true;
+                c.stopWriter();
+            }
+            i = i + 1;
+        }
+        return;
+    }
+
+    public int32 openSessions() {
+        return this.reg.openCount();
+    }
+}

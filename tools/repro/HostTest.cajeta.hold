@@ -1,0 +1,239 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.Host;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsUpgrade;
+import dev.cajeta.llm.LlmEngine;
+
+/**
+ * Plan 7.1 — host mode over WebSocket, in-process on loopback: the
+ * host loop runs on the test's thread while client FIBERS connect,
+ * auth, open sessions, and drive turns against ONE toy engine (7.1.2's
+ * one-model-load claim is structural here: there is exactly one
+ * LlmEngine in the process).
+ */
+public class HostTest {
+
+    static final String TOKEN = "sesame";
+
+    /** One scripted client's run and its evidence. */
+    static class ClientRun {
+        public int32 port;
+        public String prompt;
+        public int64 wireId;
+        public String acc;      // concatenated chunk text
+        public String finish;
+        public int64 session;
+        public boolean sawAuthed;
+        public boolean closedEarly;
+        public boolean sendShutdown;
+        public ClientRun waitFor;   // finish first, before any shutdown
+        public ClientRun() {
+            this.port = 0;
+            this.prompt = "";
+            this.wireId = 0L;
+            this.acc = "";
+            this.finish = "";
+            this.session = 0L - 1L;
+            this.sawAuthed = false;
+            this.closedEarly = false;
+            this.sendShutdown = false;
+            this.waitFor = null;
+        }
+    }
+
+    public HostTest() { return; }
+
+    static #WebSocket dial(int32 port, AsyncReader rd, AsyncWriter wr) {
+        Uri u #= Uri.builder().scheme("ws").host("127.0.0.1")
+            .port(port).path("/").build();
+        return #WsUpgrade.connectClient(rd, wr, u, 424242);
+    }
+
+    static #String recvText(WebSocket ws) {
+        WsMessage m #= ws.receive();
+        if (m == null) {
+            return null;
+        }
+        return #m.text();
+    }
+
+    static async int32 runClient(ClientRun cr) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(cr.port, rd, wr);
+
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        if (au == null || !au.contains("authed")) {
+            cr.closedEarly = true;
+            sock.close();
+            return 0;
+        }
+        cr.sawAuthed = true;
+
+        ws.send("{\"op\":\"open\",\"id\":" + cr.wireId + "}");
+        String op #= HostTest.recvText(ws);
+        JsonValue ov #= Json.parse(op);
+        cr.session = ov.object().get("session").asInt64();
+
+        ws.send("{\"op\":\"generate\",\"id\":" + cr.wireId
+            + ",\"session\":" + cr.session + ",\"prompt\":\""
+            + cr.prompt + "\",\"n\":6,\"temp\":0}");
+        while (true) {
+            String line #= HostTest.recvText(ws);
+            if (line == null) {
+                break;
+            }
+            JsonValue v #= Json.parse(line);
+            JsonObject o = v.object();
+            if (o.containsKey("chunk")) {
+                String ctext #= o.get("chunk").asString();
+                cr.acc = cr.acc + ctext;
+            } else if (o.containsKey("done")) {
+                String f #= o.get("finish").asString();
+                cr.finish = f;
+                break;
+            }
+        }
+        if (cr.sendShutdown) {
+            // Never take the host down under someone else's turn.
+            int32 tries = 0;
+            while (cr.waitFor != null
+                    && cr.waitFor.finish.byteLength() == 0
+                    && tries < 1000) {
+                Tasks.sleepMillis(5L);
+                tries = tries + 1;
+            }
+            ws.send("{\"op\":\"shutdown\"}");
+            // Let the frame FLUSH: close-on-send loses the buffered
+            // frame and the host loop waits forever (measured — the
+            // 61-minute suite wedge was exactly this).
+            Tasks.sleepMillis(200L);
+        }
+        sock.close();
+        return 0;
+    }
+
+    /** A client that skips auth: its first real op must get the
+     *  connection CLOSED before any answer (7.1.4). */
+    static async int32 runUnauthed(ClientRun cr) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(cr.port, rd, wr);
+        ws.send("{\"op\":\"open\",\"id\":9}");
+        String ans = null;
+        try {
+            ans #= HostTest.recvText(ws);
+        } catch (Exception e) {
+        }
+        cr.closedEarly = ans == null;
+        sock.close();
+        return 0;
+    }
+
+    /** Waits for the unauthed probe to be refused, then auths and shuts
+     *  the host down so the test's host loop can return. */
+    static async int32 runShutdowner(ClientRun cr, ClientRun watched) {
+        int32 tries = 0;
+        while (!watched.closedEarly && tries < 1000) {
+            Tasks.sleepMillis(5L);
+            tries = tries + 1;
+        }
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(cr.port, rd, wr);
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        cr.sawAuthed = au != null && au.contains("authed");
+        ws.send("{\"op\":\"shutdown\"}");
+        Tasks.sleepMillis(200L);
+        sock.close();
+        return 0;
+    }
+
+    /** 7.1.1 + 7.1.2 — two clients, one engine: own sessions, own
+     *  outputs, both correct against their prompts' solo runs. */
+    @Test
+    public void twoClientsShareOneModelAndKeepTheirOutputs() {
+        String soloA #= ConcurrencyTest.serialRun("tmp/ht-solo-a.jsonl",
+            1L, ConcurrencyTest.PROMPT_A);
+        String soloB #= ConcurrencyTest.serialRun("tmp/ht-solo-b.jsonl",
+            2L, ConcurrencyTest.PROMPT_B);
+        Assert.isFalse(soloA.equals(soloB));
+
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 2, 60000L);
+        h.listen(0);
+
+        ClientRun ca = heap ClientRun();
+        ca.port = h.port;
+        ca.prompt = ConcurrencyTest.PROMPT_A;
+        ca.wireId = 1L;
+        ClientRun cb = heap ClientRun();
+        cb.port = h.port;
+        cb.prompt = ConcurrencyTest.PROMPT_B;
+        cb.wireId = 2L;
+        cb.sendShutdown = true;
+        cb.waitFor = ca;
+
+        scope {
+            spawn runClient(ca);
+            spawn runClient(cb);
+            h.run();
+            h.shutdown();
+        }
+
+        Assert.isTrue(ca.sawAuthed);
+        Assert.isTrue(cb.sawAuthed);
+        Assert.isTrue(ca.session != cb.session);
+        Assert.isTrue(ca.acc.equals(soloA));
+        Assert.isTrue(cb.acc.equals(soloB));
+        Assert.isTrue(ca.finish.byteLength() > 0);
+        Assert.isTrue(cb.finish.byteLength() > 0);
+    }
+
+    /** 7.1.4 — no token, no service: the connection closes before any
+     *  op is processed. */
+    @Test
+    public void aConnectionWithoutATokenIsClosedFirst() {
+        LlmEngine e #= ConcurrencyTest.engine(1);
+        Host h = heap Host(#e, HostTest.TOKEN, 2, 1, 60000L);
+        h.listen(0);
+        ClientRun cu = heap ClientRun();
+        cu.port = h.port;
+        ClientRun cw = heap ClientRun();
+        cw.port = h.port;
+        scope {
+            spawn runUnauthed(cu);
+            spawn runShutdowner(cw, cu);
+            h.run();
+            h.shutdown();
+        }
+        Assert.isTrue(cu.closedEarly);
+        Assert.isTrue(cw.sawAuthed);
+    }
+}

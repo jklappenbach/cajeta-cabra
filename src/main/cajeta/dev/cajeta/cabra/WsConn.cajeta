@@ -1,0 +1,223 @@
+package dev.cajeta.cabra;
+
+import cajeta.collection.ArrayList;
+import cajeta.concurrent.Lock;
+import cajeta.concurrent.LockGuard;
+import cajeta.concurrent.Semaphore;
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.TcpStream;
+import cajeta.lang.String;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsUpgrade;
+
+/**
+ * One host-mode connection (plan 7.2.2): owns the socket, its buffered
+ * halves, the upgraded `WebSocket`, and the OUTBOUND ring its writer
+ * fiber drains — because `ws.send` blocks when the peer's TCP window
+ * is full, and a client that stops reading must never stall the host
+ * loop or another session (spec §5.3.2, 7.1.6). The host enqueues;
+ * this connection's writer fiber pays the peer's slowness; past the
+ * ring bound the connection is SHED (marked dead), not waited on.
+ *
+ * The reader fiber turns inbound frames into (connSlot) signals on the
+ * host's shared channel — the LineReader pattern, one ring per
+ * connection for inbound lines too.
+ */
+public final class WsConn {
+
+    static final int32 IN_CAP = 16;
+    static final int32 OUT_CAP = 256;
+
+    public int32 slot;          // index in the host's table
+    public boolean authed;
+    public boolean dead;
+
+    TcpStream sock;             // owned
+    AsyncReader rd;             // owned; borrowed by ws
+    AsyncWriter wr;             // owned; borrowed by ws
+    WebSocket ws;               // owned
+
+    // Inbound ring (reader fiber writes, host loop reads).
+    ArrayList<String> inSlots;
+    int32 inNext;
+
+    // Outbound ring (host loop writes, writer fiber drains).
+    Lock outMu;
+    Semaphore outReady;
+    ArrayList<String> outSlots;
+    int32 outHead;
+    int32 outTail;
+    int32 outQueued;
+    boolean outStop;
+    boolean outStopped;
+
+    Task<int32> readTask;
+    Task<int32> writeTask;
+
+    public WsConn(int32 slot, #TcpStream sock) {
+        this.slot = slot;
+        this.authed = false;
+        this.dead = false;
+        this.sock #= sock;
+        this.rd = heap AsyncReader(this.sock);
+        this.wr = heap AsyncWriter(this.sock);
+        this.ws = null;
+        this.inSlots = heap ArrayList<String>();
+        int32 i = 0;
+        while (i < WsConn.IN_CAP) {
+            String e #= WsConn.cp("");
+            this.inSlots.add(#e);
+            i = i + 1;
+        }
+        this.inNext = 0;
+        this.outMu = heap Lock();
+        this.outReady = heap Semaphore(0);
+        this.outSlots = heap ArrayList<String>();
+        i = 0;
+        while (i < WsConn.OUT_CAP) {
+            String e2 #= WsConn.cp("");
+            this.outSlots.add(#e2);
+            i = i + 1;
+        }
+        this.outHead = 0;
+        this.outTail = 0;
+        this.outQueued = 0;
+        this.outStop = false;
+        this.outStopped = false;
+        return;
+    }
+
+    static #String cp(String s) {
+        int8[] b #= s.toBytes();
+        String c = heap String(#b, s.byteLength());
+        return #= c;
+    }
+
+    /** Host loop: enqueue one outbound message. False = the ring is
+     *  full (a non-reading client) — the caller sheds the connection
+     *  rather than waiting (§5.3.2). */
+    public boolean enqueueOut(String m) {
+        {
+            LockGuard g #= this.outMu.acquire();
+            if (this.outQueued >= WsConn.OUT_CAP) {
+                return false;
+            }
+            String c #= WsConn.cp(m);
+            this.outSlots.set(this.outHead, #c);
+            this.outHead = (this.outHead + 1) % WsConn.OUT_CAP;
+            this.outQueued = this.outQueued + 1;
+        }
+        this.outReady.release();
+        return true;
+    }
+
+    /** The writer fiber: drain the ring into `ws.send`, absorbing the
+     *  peer's read pace so nobody else has to. */
+    public static async int32 writeLoop(WsConn c) {
+        while (true) {
+            c.outReady.acquire();
+            String m = null;
+            boolean have = false;
+            {
+                LockGuard g #= c.outMu.acquire();
+                if (c.outQueued > 0) {
+                    m #= WsConn.cp(c.outSlots.get(c.outTail));
+                    c.outTail = (c.outTail + 1) % WsConn.OUT_CAP;
+                    c.outQueued = c.outQueued - 1;
+                    have = true;
+                }
+            }
+            if (have) {
+                try {
+                    c.ws.send(m);
+                } catch (Exception e) {
+                    c.dead = true;
+                }
+            } else if (c.outStop) {
+                {
+                    LockGuard g2 #= c.outMu.acquire();
+                    c.outStopped = true;
+                }
+                return 0;
+            }
+        }
+    }
+
+    /** Spawn this connection's reader (which, once upgraded, spawns
+     *  the writer). Lives HERE because `spawn` accepts only an
+     *  unqualified same-class static (ASYNC_R3A), and the two-step
+     *  binding is the one that neither double-frees nor join-blocks. */
+    public static void startRead(WsConn c, Host h) {
+        Task<int32> t = spawn readLoop(c, h);
+        c.readTask #= t;
+        return;
+    }
+
+    /** The reader fiber: upgrade, then feed inbound text messages into
+     *  the shared host channel as (connSlot) signals via the host's
+     *  ring protocol. `hostCh` is a lending channel of conn slots; the
+     *  LINE lives in this connection's inbound ring. */
+    public static async int32 readLoop(WsConn c, Host h) {
+        try {
+            WebSocket w #= WsUpgrade.acceptServer(c.rd, c.wr);
+            c.ws #= w;
+        } catch (Exception e) {
+            c.dead = true;
+            h.connGone(c.slot);
+            return 0;
+        }
+        Task<int32> wt = spawn writeLoop(c);
+        c.writeTask #= wt;
+        while (!c.dead) {
+            WsMessage m = null;
+            try {
+                m #= c.ws.receive();
+            } catch (Exception e) {
+                break;
+            }
+            if (m == null) {
+                break;
+            }
+            if (!m.isText()) {
+                continue;
+            }
+            String text #= m.text();
+            int32 s = c.inNext;
+            String owned #= WsConn.cp(text);
+            c.inSlots.set(s, #owned);
+            c.inNext = (c.inNext + 1) % WsConn.IN_CAP;
+            // Backpressure parks THIS fiber if the host loop lags.
+            h.inbound(c.slot, s);
+        }
+        c.dead = true;
+        h.connGone(c.slot);
+        return 0;
+    }
+
+    public String inLineAt(int32 s) {
+        return this.inSlots.get(s);
+    }
+
+    /** Stop the writer fiber and wait for it. */
+    public void stopWriter() {
+        {
+            LockGuard g #= this.outMu.acquire();
+            this.outStop = true;
+        }
+        this.outReady.release();
+        while (true) {
+            boolean done = false;
+            {
+                LockGuard g2 #= this.outMu.acquire();
+                done = this.outStopped;
+            }
+            if (done || this.writeTask == null) {
+                return;
+            }
+            Tasks.sleepMillis(1L);
+        }
+    }
+}

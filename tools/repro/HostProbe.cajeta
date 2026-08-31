@@ -1,0 +1,147 @@
+package probe;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.concurrent.Tasks;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.lang.String;
+import dev.cajeta.cabra.Host;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsUpgrade;
+import dev.cajeta.llm.EngineOptions;
+import dev.cajeta.llm.LlmEngine;
+
+final class Run {
+    public int32 port;
+    public String prompt;
+    public int64 wireId;
+    public String tag;
+    public String finish;
+    public boolean sendShutdown;
+    public Run other;
+    public Run() {
+        this.port = 0;
+        this.prompt = "";
+        this.wireId = 0L;
+        this.tag = "";
+        this.finish = "";
+        this.sendShutdown = false;
+        this.other = null;
+    }
+}
+
+public final class HostProbe {
+
+    public HostProbe() { return; }
+
+    static async int32 client(Run cr) {
+        System.stdout.println(cr.tag + ": connect");
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        Uri u #= Uri.builder().scheme("ws").host("127.0.0.1")
+            .port(cr.port).path("/").build();
+        WebSocket ws #= WsUpgrade.connectClient(rd, wr, u, 424242);
+        System.stdout.println(cr.tag + ": upgraded");
+
+        ws.send("{\"op\":\"auth\",\"token\":\"sesame\"}");
+        WsMessage am #= ws.receive();
+        String au #= am.text();
+        System.stdout.println(cr.tag + ": auth " + au);
+
+        ws.send("{\"op\":\"open\",\"id\":" + cr.wireId + "}");
+        WsMessage om #= ws.receive();
+        String op #= om.text();
+        System.stdout.println(cr.tag + ": open " + op);
+        JsonValue ov #= Json.parse(op);
+        int64 sid = ov.object().get("session").asInt64();
+
+        ws.send("{\"op\":\"generate\",\"id\":" + cr.wireId
+            + ",\"session\":" + sid + ",\"prompt\":\"" + cr.prompt
+            + "\",\"n\":6,\"temp\":0}");
+        int32 chunks = 0;
+        while (true) {
+            WsMessage m #= ws.receive();
+            if (m == null) {
+                System.stdout.println(cr.tag + ": null recv");
+                break;
+            }
+            String line #= m.text();
+            JsonValue v #= Json.parse(line);
+            JsonObject o = v.object();
+            if (o.containsKey("chunk")) {
+                chunks = chunks + 1;
+            } else if (o.containsKey("done")) {
+                String f #= o.get("finish").asString();
+                cr.finish = f;
+                System.stdout.println(cr.tag + ": done " + chunks
+                    + " chunks, finish " + f);
+                break;
+            } else {
+                System.stdout.println(cr.tag + ": other " + line);
+            }
+        }
+        if (cr.sendShutdown) {
+            int32 tries = 0;
+            while (cr.other != null
+                    && cr.other.finish.byteLength() == 0
+                    && tries < 1000) {
+                Tasks.sleepMillis(5L);
+                tries = tries + 1;
+            }
+            System.stdout.println(cr.tag + ": sending shutdown (waited "
+                + tries + ")");
+            ws.send("{\"op\":\"shutdown\"}");
+            Tasks.sleepMillis(200L);
+        }
+        sock.close();
+        System.stdout.println(cr.tag + ": exit");
+        return 0;
+    }
+
+    public static int32 run() {
+        EngineOptions opts = heap EngineOptions(
+            "../cajeta-llm/src/test/fixtures/gguf/toy.gguf");
+        opts.ctx = 128;
+        opts.maxSeqs = 2;
+        LlmEngine e #= LlmEngine.load(#opts);
+        System.stdout.println("h: engine loaded");
+        Host h = heap Host(#e, "sesame", 4, 2, 60000L);
+        h.listen(0);
+        System.stdout.println("h: listening on " + h.port);
+
+        Run ca = heap Run();
+        ca.port = h.port;
+        ca.prompt = "hello";
+        ca.wireId = 1L;
+        ca.tag = "A";
+        Run cb = heap Run();
+        cb.port = h.port;
+        cb.prompt = "the quick brown fox";
+        cb.wireId = 2L;
+        cb.tag = "B";
+        cb.sendShutdown = true;
+        cb.other = ca;
+
+        scope {
+            spawn client(ca);
+            spawn client(cb);
+            System.stdout.println("h: entering run loop");
+            h.run();
+            System.stdout.println("h: run loop returned");
+            h.shutdown();
+            System.stdout.println("h: shutdown complete");
+        }
+        System.stdout.println("h: scope joined");
+        return 0;
+    }
+}
