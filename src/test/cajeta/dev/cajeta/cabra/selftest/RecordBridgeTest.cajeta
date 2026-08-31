@@ -1,0 +1,195 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.collection.ArrayList;
+import cajeta.io.file.File;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.lang.String;
+import cajeta.concurrent.Tasks;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.RecordBridge;
+import dev.cajeta.cabra.Serve;
+import dev.cajeta.llm.Diag;
+import dev.cajeta.llm.DiagCallback;
+import dev.cajeta.llm.DiagRecord;
+import dev.cajeta.llm.EngineOptions;
+import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.llm.LlmException;
+import dev.cajeta.logging.Appender;
+import dev.cajeta.logging.CapturingAppender;
+import dev.cajeta.logging.Level;
+import dev.cajeta.logging.Log;
+import dev.cajeta.logging.Logger;
+import dev.cajeta.logging.TextEncoder;
+
+/**
+ * Plan unit 9 — diagnostics as records (spec §8.2; engine §11.8).
+ *
+ * The bridge's contract has two halves and each gets its own failure
+ * mode: the ENGINE half (enqueue and return — anything more is latency
+ * on every token, 9.1.3) and the CONSUMER half (attribute, render, log
+ * on cabra's own fiber, 9.1.1/9.3.1). The slow-consumer test asserts
+ * the split structurally: at generation end the drainer is BEHIND, so
+ * the handler cannot have been doing the publishing inline.
+ */
+public class RecordBridgeTest {
+
+    static final String TOY =
+        "../cajeta-llm/src/test/fixtures/gguf/toy.gguf";
+
+    public RecordBridgeTest() { return; }
+
+    static #LlmEngine engine(int32 maxSeqs) {
+        EngineOptions opts = heap EngineOptions(RecordBridgeTest.TOY);
+        opts.ctx = 128;
+        opts.maxSeqs = maxSeqs;
+        return #LlmEngine.load(#opts);
+    }
+
+    static #String genLine(int64 id, String prompt) {
+        String s = "{\"op\":\"generate\",\"id\":" + id + ",\"prompt\":\""
+            + prompt + "\",\"n\":6,\"temp\":0}";
+        return #s;
+    }
+
+    /** An appender whose consumer is deliberately slow — 9.1.3's
+     *  instrument. The sleep is in the PUBLISHER path; if the engine's
+     *  callback were doing the publishing, every token would pay it. */
+    static class SlowAppender implements Appender {
+        public int32 n;
+        public SlowAppender() { this.n = 0; }
+        public void append(#int8[] line) {
+            Tasks.sleepMillis(25L);
+            this.n = this.n + 1;
+            return;
+        }
+    }
+
+    /** 11.8.5 from the consumer side: a handler that throws. */
+    static class Thrower implements DiagCallback {
+        public Thrower() { return; }
+        public void onRecord(DiagRecord r) {
+            throw heap LlmException("cabra handler fault, deliberate");
+        }
+    }
+
+    /** 9.1.1 + 9.3.1 — two sessions in flight; each record lands in the
+     *  log attributed to the session that produced it. The text stream
+     *  this replaces could not express the difference at all. */
+    @Test
+    public void recordsArriveAttributedToTheirSession() {
+        CapturingAppender cap #= heap CapturingAppender();
+        Logger log #= Log.capturing("cabra.engine", Level.DEBUG, #cap);
+        RecordBridge b #= heap RecordBridge(#log);
+        RecordBridge.start(b);
+        {
+            Diag.register(b);
+
+            LlmEngine e #= RecordBridgeTest.engine(2);
+            String path = "tmp/rb-attr.jsonl";
+            FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+            Serve s = heap Serve(#e, #fw, RecordBridgeTest.TOY, 128);
+            String gA #= RecordBridgeTest.genLine(1L, "hello");
+            String gB #= RecordBridgeTest.genLine(2L,
+                "the quick brown fox");
+            s.handleLine(gA);
+            s.handleLine(gB);
+            s.drive();
+            s.close();
+
+            Diag.register(null);
+            b.flush();
+            b.close();
+        }
+        Assert.isTrue(b.enqueuedCount() > 0L);
+        Assert.equals(b.enqueuedCount(), b.publishedCount());
+        boolean saw0 = false;
+        boolean saw1 = false;
+        int32 i = 0;
+        while (i < cap.count()) {
+            String ln = cap.get(i);
+            if (ln.contains("req=0")) { saw0 = true; }
+            if (ln.contains("req=1")) { saw1 = true; }
+            i = i + 1;
+        }
+        Assert.isTrue(saw0);
+        Assert.isTrue(saw1);
+    }
+
+    /** 9.1.3 — the slow consumer is NOT on the token path. Structural
+     *  form: when drive() returns, the drainer is still behind (records
+     *  queued faster than 25 ms each can publish), which is impossible
+     *  if the engine-thread handler published inline. Then flush and
+     *  everything still arrives. */
+    @Test
+    public void aSlowConsumerIsNotOnTheTokenPath() {
+        SlowAppender slow = heap SlowAppender();
+        TextEncoder enc = heap TextEncoder();
+        // Logger BORROWS encoder and appender (plain params); both live
+        // in this frame past every use of the logger.
+        Logger log #= heap Logger("cabra.engine", Level.DEBUG, enc, slow);
+        RecordBridge b #= heap RecordBridge(#log);
+        RecordBridge.start(b);
+        int64 lag = 0L;
+        {
+            Diag.register(b);
+
+            LlmEngine e #= RecordBridgeTest.engine(1);
+            String path = "tmp/rb-slow.jsonl";
+            FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+            Serve s = heap Serve(#e, #fw, RecordBridgeTest.TOY, 128);
+            String g #= RecordBridgeTest.genLine(7L, "hello");
+            s.handleLine(g);
+            s.drive();
+            lag = b.enqueuedCount() - b.publishedCount();
+            s.close();
+
+            Diag.register(null);
+            b.flush();
+            b.close();
+        }
+        Assert.isTrue(b.enqueuedCount() > 2L);
+        // The proof of 9.1.3: generation finished while publishing had
+        // barely started.
+        Assert.isTrue(lag > 0L);
+        Assert.equals(b.enqueuedCount(), b.publishedCount());
+        Assert.equals((int64) slow.n, b.publishedCount());
+    }
+
+    /** 9.1.2 — a handler that throws does not take the turn down: the
+     *  generation completes and produces its done line. */
+    @Test
+    public void aThrowingHandlerDoesNotTakeTheTurnDown() {
+        Thrower bad = heap Thrower();
+        Diag.register(bad);
+        LlmEngine e #= RecordBridgeTest.engine(1);
+        String path = "tmp/rb-throw.jsonl";
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, RecordBridgeTest.TOY, 128);
+        String g #= RecordBridgeTest.genLine(3L, "hello");
+        s.handleLine(g);
+        int32 completed = s.drive();
+        s.close();
+        Diag.register(null);
+        Assert.equals(1, completed);
+    }
+
+    /** 9.1.4 — with no callback registered, nothing is recorded and no
+     *  record is even BUILT (the engine's builtCount is the assertable
+     *  form; cabra adds that a full serve turn leaves it untouched). */
+    @Test
+    public void unregisteredMeansNothingIsBuilt() {
+        Diag.register(null);
+        int64 b0 = Diag.builtCount();
+        LlmEngine e #= RecordBridgeTest.engine(1);
+        String path = "tmp/rb-off.jsonl";
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, RecordBridgeTest.TOY, 128);
+        String g #= RecordBridgeTest.genLine(4L, "hello");
+        s.handleLine(g);
+        s.drive();
+        s.close();
+        Assert.equals(b0, Diag.builtCount());
+    }
+}

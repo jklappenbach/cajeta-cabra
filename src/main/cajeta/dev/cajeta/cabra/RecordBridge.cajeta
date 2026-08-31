@@ -1,0 +1,295 @@
+package dev.cajeta.cabra;
+
+import cajeta.collection.ArrayList;
+import cajeta.concurrent.Lock;
+import cajeta.concurrent.LockGuard;
+import cajeta.concurrent.Semaphore;
+import cajeta.concurrent.Tasks;
+import cajeta.lang.String;
+import dev.cajeta.llm.DiagCallback;
+import dev.cajeta.llm.DiagRecord;
+import dev.cajeta.logging.Logger;
+
+/**
+ * cabra's consumer of the engine's diagnostic RECORDS (spec §8.2, plan
+ * unit 9; engine side: `cajeta-llm-spec` §11.8).
+ *
+ * The callback runs on the ENGINE's thread mid-generation (§8.2.1), so
+ * `onRecord` copies the record's fields into a bounded ring and
+ * returns — no formatting, no I/O, no allocation beyond the string
+ * copies the ring must own anyway (the engine reuses its record; a
+ * consumer that keeps anything copies it). A drainer fiber, spawned by
+ * whoever owns the bridge, renders each record and hands the line to
+ * `dev.cajeta.logging` — route chatter at DEBUG (§8.3), and
+ * "launch-failure" at ERROR: a dispatch that never ran means output
+ * computed on garbage, which is operator news at any threshold.
+ *
+ * The RING is cabra's buffer, sized by cabra's policy (§8.2.2): CAP
+ * records; beyond it new records are SHED and counted, never blocked
+ * on — backpressure here would be latency on every token, which is
+ * the exact failure §8.2.1 names.
+ *
+ * Lifecycle: construct, `RecordBridge.start(bridge)`, and eventually
+ * `close()` — which stops the drainer and WAITS for it, so drop order
+ * afterwards is a non-issue. The serve process closes on shutdown; a
+ * test closes before its assertions.
+ */
+public final class RecordBridge implements DiagCallback {
+
+    static final int32 CAP = 512;
+
+    // OWNED: the logging seam this bridge publishes into. `Log.at`
+    // hands back a `#Logger` and the bridge outlives the call that
+    // built it.
+    Logger log;
+    Lock mu;            // guards every ring field below
+    Semaphore ready;    // one permit per queued record, plus close()'s
+    ArrayList<String> cats;    // CAP slots, reused in place
+    ArrayList<String> names;
+    int64[] vals;       // slot i: [i*8+0..5]=v0..v5, [i*8+6]=session
+    int32 head;
+    int32 tail;
+    int32 queued;
+    int64 enq;          // ever enqueued
+    int64 pub;          // ever published (rendered + logged)
+    int64 shed;         // dropped at the CAP bound
+    boolean stop;
+    boolean stopped;    // drainer has actually exited
+    // The drainer, held so the spawn is not joined the moment its
+    // temporary drops. `spawn` only accepts an UNQUALIFIED same-class
+    // static (CAJETA_ERROR_ASYNC_R3A), which is why `start` lives here.
+    Task<int32> drainer;
+
+    public RecordBridge(#Logger l) {
+        this.log #= l;
+        this.mu = heap Lock();
+        this.ready = heap Semaphore(0);
+        this.cats = heap ArrayList<String>();
+        this.names = heap ArrayList<String>();
+        int32 i = 0;
+        while (i < RecordBridge.CAP) {
+            String c0 #= RecordBridge.cp("");
+            this.cats.add(#c0);
+            String n0 #= RecordBridge.cp("");
+            this.names.add(#n0);
+            i = i + 1;
+        }
+        this.vals #= heap int64[(int64) RecordBridge.CAP * 8L];
+        this.head = 0;
+        this.tail = 0;
+        this.queued = 0;
+        this.enq = 0L;
+        this.pub = 0L;
+        this.shed = 0L;
+        this.stop = false;
+        this.stopped = false;
+        return;
+    }
+
+    /** Spawn the drainer fiber. Call once, right after construction.
+     *
+     *  The TWO-STEP binding is load-bearing, each arm measured
+     *  2026-08-31: `b.drainer #= spawn ..` double-frees (the spawn's
+     *  transient drop entry is only inactivated on the plain-DECLARATION
+     *  binding, LocalVariableDeclaration.cpp:1155 — the `#=` path never
+     *  learned spawn), and `b.drainer = spawn ..` leaves the transient
+     *  entry owned by THIS frame, whose scope-exit drop waits on the
+     *  done flag — start() would block until the drainer exits. Local
+     *  declaration fires the inactivation; `#=` move-out of the LOCAL
+     *  transfers the one armed entry to the field. One owner, no join
+     *  here. */
+    public static void start(RecordBridge b) {
+        Task<int32> t = spawn drain(b);
+        b.drainer #= t;
+        return;
+    }
+
+    static #String cp(String s) {
+        int8[] b #= s.toBytes();
+        String c = heap String(#b, s.byteLength());
+        return #= c;
+    }
+
+    /** Engine thread: copy, signal, return (§8.2.1). */
+    public void onRecord(DiagRecord r) {
+        {
+            LockGuard g #= this.mu.acquire();
+            if (this.queued >= RecordBridge.CAP) {
+                // §8.2.2: shedding is the policy; blocking would be
+                // token latency.
+                this.shed = this.shed + 1L;
+                return;
+            }
+            int32 s = this.head;
+            String c #= RecordBridge.cp(r.category);
+            this.cats.set(s, #c);
+            String n #= RecordBridge.cp(r.name != null ? r.name : "-");
+            this.names.set(s, #n);
+            int64 b = (int64) s * 8L;
+            this.vals[b] = r.v0;
+            this.vals[b + 1L] = r.v1;
+            this.vals[b + 2L] = r.v2;
+            this.vals[b + 3L] = r.v3;
+            this.vals[b + 4L] = r.v4;
+            this.vals[b + 5L] = r.v5;
+            this.vals[b + 6L] = (int64) r.session;
+            this.head = (this.head + 1) % RecordBridge.CAP;
+            this.queued = this.queued + 1;
+            this.enq = this.enq + 1L;
+        }
+        this.ready.release();
+        return;
+    }
+
+    /** The publisher loop — cabra's own fiber, never the engine's
+     *  thread. Spawn it; `close()` ends it. */
+    public static async int32 drain(RecordBridge b) {
+        while (true) {
+            b.ready.acquire();
+            String cat = null;
+            String nm = null;
+            int64 v0 = 0L;
+            int64 v1 = 0L;
+            int64 v2 = 0L;
+            int64 v3 = 0L;
+            int64 v4 = 0L;
+            int64 v5 = 0L;
+            int64 sess = 0L;
+            boolean have = false;
+            {
+                LockGuard g #= b.mu.acquire();
+                if (b.queued > 0) {
+                    int32 s = b.tail;
+                    cat #= RecordBridge.cp(b.cats.get(s));
+                    nm #= RecordBridge.cp(b.names.get(s));
+                    int64 base = (int64) s * 8L;
+                    v0 = b.vals[base];
+                    v1 = b.vals[base + 1L];
+                    v2 = b.vals[base + 2L];
+                    v3 = b.vals[base + 3L];
+                    v4 = b.vals[base + 4L];
+                    v5 = b.vals[base + 5L];
+                    sess = b.vals[base + 6L];
+                    b.tail = (b.tail + 1) % RecordBridge.CAP;
+                    b.queued = b.queued - 1;
+                    have = true;
+                }
+            }
+            if (have) {
+                // A consumer's logging fault stays the consumer's:
+                // swallow and keep draining (plan 9.1.2's spirit, on
+                // this side of the seam).
+                try {
+                    b.publish(cat, nm, sess, v0, v1, v2, v3, v4, v5);
+                } catch (Exception e) {
+                }
+                {
+                    LockGuard g2 #= b.mu.acquire();
+                    b.pub = b.pub + 1L;
+                }
+            } else if (b.stop) {
+                {
+                    LockGuard g3 #= b.mu.acquire();
+                    b.stopped = true;
+                }
+                return 0;
+            }
+        }
+    }
+
+    /** Rendering is CONSUMER work (11.8.2); one line per record,
+     *  session always visible so a log reader can attribute (§8.2,
+     *  9.3.1). */
+    void publish(String cat, String nm, int64 sess, int64 v0, int64 v1,
+            int64 v2, int64 v3, int64 v4, int64 v5) {
+        if (cat.equals("launch-failure")) {
+            this.log.error("LAUNCH FAILURE: " + v0 + " dispatch(es) "
+                + "never ran in step " + v1 + " (session " + sess + ")");
+            return;
+        }
+        if (cat.equals("sched-step")) {
+            this.log.debug("sched step=" + v0 + " req=" + sess
+                + " slot=" + v1 + " cachedLen=" + v2 + " n=" + v3
+                + " totalLen=" + v4 + " cacheLen=" + v5);
+            return;
+        }
+        if (cat.equals("sched-admit")) {
+            this.log.debug("sched admit req=" + sess + " -> slot=" + v0
+                + " (" + nm + ") cacheLen=" + v1);
+            return;
+        }
+        if (cat.equals("batch-route")) {
+            this.log.debug("batch-route: " + nm + " out=" + v0
+                + " in=" + v1);
+            return;
+        }
+        if (cat.equals("prefill-mode")) {
+            this.log.debug("prefill: " + nm + " projections rows=" + v0);
+            return;
+        }
+        if (cat.equals("kv-ceiling")) {
+            this.log.debug("device kv ceiling: " + (v0 / 1048576L)
+                + " MiB (" + v1 + " slots x " + v2 + " ctx)");
+            return;
+        }
+        // Unknown categories render generically — a new engine record
+        // must not vanish because cabra lagged.
+        this.log.debug(cat + " s=" + sess + " " + nm + " " + v0 + " "
+            + v1 + " " + v2 + " " + v3 + " " + v4 + " " + v5);
+        return;
+    }
+
+    /** Block (politely) until everything enqueued so far is published.
+     *  Test/shutdown aid; never on the token path. */
+    public void flush() {
+        while (true) {
+            boolean done = false;
+            {
+                LockGuard g #= this.mu.acquire();
+                done = this.queued == 0 && this.pub == this.enq;
+            }
+            if (done) {
+                return;
+            }
+            Tasks.sleepMillis(1L);
+        }
+    }
+
+    /** Stop the drainer once the ring is empty, and WAIT until it has
+     *  exited — so the bridge (and everything the drainer reads) can be
+     *  dropped in any order afterwards. */
+    public void close() {
+        {
+            LockGuard g #= this.mu.acquire();
+            this.stop = true;
+        }
+        this.ready.release();
+        while (true) {
+            boolean done = false;
+            {
+                LockGuard g2 #= this.mu.acquire();
+                done = this.stopped;
+            }
+            if (done) {
+                return;
+            }
+            this.ready.release();
+            Tasks.sleepMillis(1L);
+        }
+    }
+
+    public int64 publishedCount() {
+        LockGuard g #= this.mu.acquire();
+        return this.pub;
+    }
+
+    public int64 enqueuedCount() {
+        LockGuard g #= this.mu.acquire();
+        return this.enq;
+    }
+
+    public int64 shedCount() {
+        LockGuard g #= this.mu.acquire();
+        return this.shed;
+    }
+}

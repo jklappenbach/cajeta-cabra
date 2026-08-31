@@ -27,16 +27,19 @@ import dev.cajeta.logging.Logger;
  */
 public final class Main {
 
-    // The bridge and its logger, OWNED here for the life of the process:
-    // `Diag.setSink` records a BORROW, so whatever it points at must be
-    // held by someone for as long as diagnostics are on.
-    static LoggingDiagSink diagSink;
+    // The bridge and its drainer, OWNED here for the life of the
+    // process: `Diag.register` records a BORROW, so whatever it points
+    // at must be held by someone for as long as diagnostics are on. The
+    // Task static is what keeps the drainer fiber from being joined the
+    // moment it is spawned.
+    static RecordBridge bridge;
 
     /**
-     * Honor `--verbose`: route the engine's route diagnostics into
-     * `dev.cajeta.logging` at DEBUG (see `LoggingDiagSink`).
+     * Honor `--verbose`: consume the engine's diagnostic RECORDS (spec
+     * §8.2, engine §11.8) through `RecordBridge` — enqueue on the
+     * engine's thread, render + log on cabra's own drainer fiber.
      *
-     * Off by default, and off means the engine writes nothing at all —
+     * Off by default, and off means the engine BUILDS nothing at all —
      * stdout is protocol-pure and stderr is not a dumping ground.
      */
     static void applyDiag(boolean verbose) {
@@ -48,8 +51,9 @@ public final class Main {
             // borrows the process's DI encoder+appender, so both
             // aggregate into one stream (Julian, 2026-08-30).
             Logger log #= Log.at("cabra.engine", Level.DEBUG);
-            Main.diagSink #= heap LoggingDiagSink(#log);
-            Diag.setSink(Main.diagSink);
+            Main.bridge #= heap RecordBridge(#log);
+            RecordBridge.start(Main.bridge);
+            Diag.register(Main.bridge);
         }
         return;
     }
@@ -147,6 +151,12 @@ public final class Main {
         }
         // EOF with work still in flight: finish it before exiting.
         s.drive();
+        // Let the drainer publish what generation enqueued, then stop
+        // it, so the static Task's exit-time join terminates.
+        if (Main.bridge != null) {
+            Main.bridge.flush();
+            Main.bridge.close();
+        }
         System.stderr.println("cabra: shutdown");
         return 0;
     }

@@ -387,26 +387,37 @@ the default chunk.
 callback landing first.*
 
 ### 9.1 TDD
-- [ ] 9.1.1 Records arrive attributed to the session that produced them,
+- [x] 9.1.1 Records arrive attributed to the session that produced them,
       with two sessions in flight — the case the current text stream
       cannot express at all.
-- [ ] 9.1.2 A handler that throws does not take the turn down.
-- [ ] 9.1.3 A slow handler is not on the token path: the handler enqueues
+- [x] 9.1.2 A handler that throws does not take the turn down.
+- [x] 9.1.3 A slow handler is not on the token path: the handler enqueues
       and returns, and per-token latency is unchanged with a deliberately
       slow consumer attached.
-- [ ] 9.1.4 With no callback registered, nothing is recorded and no
+- [x] 9.1.4 With no callback registered, nothing is recorded and no
       string is formatted.
 
 ### 9.2 Coding
-- [ ] 9.2.1 Register a callback with the engine; take the record, return.
-- [ ] 9.2.2 Publish off the engine's thread: log, and optionally forward a
+- [x] 9.2.1 Register a callback with the engine; take the record, return.
+- [x] 9.2.2 Publish off the engine's thread: log, and optionally forward a
       session's records to the client that owns it.
-- [ ] 9.2.3 Any retrospective buffer cabra wants is cabra's, sized by
+- [x] 9.2.3 Any retrospective buffer cabra wants is cabra's, sized by
       cabra's policy (§8.2.2).
 
 ### 9.3 Acceptance
-- [ ] 9.3.1 A route decision taken during one client's turn is visible in
+- [x] 9.3.1 A route decision taken during one client's turn is visible in
       cabra's log attributed to that client's session.
+
+**CLOSED 2026-08-31** (RecordBridge + RecordBridgeTest, 26/0): enqueue
+on the engine thread, bounded ring (CAP 512, shed-and-count beyond),
+drainer fiber renders onto dev.cajeta.logging — DEBUG chatter,
+launch-failure at ERROR. 9.1.3 proven structurally: with a 25 ms/line
+consumer, generation finishes while publishing lags, then flush
+delivers everything. NOTE the spawn-binding trap found here: handing a
+spawn to a field needs declare-local-then-#=-move-out — `#= spawn`
+double-frees (inactivation is declaration-only,
+LocalVariableDeclaration.cpp:1155) and `field = spawn` join-blocks the
+spawning frame. Measured, three shapes.
 
 ## 10. The multi-client 72B acceptance
 
