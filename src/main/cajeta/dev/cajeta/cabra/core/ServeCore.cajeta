@@ -1,6 +1,10 @@
-package dev.cajeta.cabra;
+package dev.cajeta.cabra.core;
 
 import cajeta.lang.String;
+import dev.cajeta.cabra.proto.ErrKind;
+import dev.cajeta.cabra.proto.Protocol;
+import dev.cajeta.cabra.proto.Req;
+import dev.cajeta.cabra.proto.Wire;
 
 /**
  * The transport-neutral serving core (spec §5.4.3, plan 6.2.5): parse

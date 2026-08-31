@@ -1,6 +1,7 @@
-package dev.cajeta.cabra;
+package dev.cajeta.cabra.core;
 
 import cajeta.lang.String;
+import dev.cajeta.cabra.proto.Wire;
 
 /**
  * The core's chunk writer, handed to a `TurnPort`: renders each chunk

@@ -10,8 +10,8 @@ import cajeta.io.file.OpenMode;
 import cajeta.lang.String;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
-import dev.cajeta.cabra.Protocol;
-import dev.cajeta.cabra.Req;
+import dev.cajeta.cabra.proto.Protocol;
+import dev.cajeta.cabra.proto.Req;
 
 /**
  * Plan 2.1.1 / 2.1.2 — the JSONL protocol, both directions, with the

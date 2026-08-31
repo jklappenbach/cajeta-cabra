@@ -1,7 +1,8 @@
-package dev.cajeta.cabra;
+package dev.cajeta.cabra.proto;
 
 import cajeta.collection.ArrayList;
 import cajeta.lang.String;
+import dev.cajeta.cabra.ws.Host;
 
 /**
  * One parsed protocol request (spec §3.1.1). Every string field is an

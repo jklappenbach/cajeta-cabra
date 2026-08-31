@@ -1,4 +1,4 @@
-package dev.cajeta.cabra;
+package dev.cajeta.cabra.diag;
 
 import cajeta.collection.ArrayList;
 import cajeta.concurrent.Lock;
@@ -29,12 +29,12 @@ import dev.cajeta.logging.Logger;
  * on — backpressure here would be latency on every token, which is
  * the exact failure §8.2.1 names.
  *
- * Lifecycle: construct, `RecordBridge.start(bridge)`, and eventually
+ * Lifecycle: construct, `DiagnosticBridge.start(bridge)`, and eventually
  * `close()` — which stops the drainer and WAITS for it, so drop order
  * afterwards is a non-issue. The serve process closes on shutdown; a
  * test closes before its assertions.
  */
-public final class RecordBridge implements DiagCallback {
+public final class DiagnosticBridge implements DiagCallback {
 
     static final int32 CAP = 512;
 
@@ -60,21 +60,21 @@ public final class RecordBridge implements DiagCallback {
     // static (CAJETA_ERROR_ASYNC_R3A), which is why `start` lives here.
     Task<int32> drainer;
 
-    public RecordBridge(#Logger l) {
+    public DiagnosticBridge(#Logger l) {
         this.log #= l;
         this.mu = heap Lock();
         this.ready = heap Semaphore(0);
         this.cats = heap ArrayList<String>();
         this.names = heap ArrayList<String>();
         int32 i = 0;
-        while (i < RecordBridge.CAP) {
-            String c0 #= RecordBridge.cp("");
+        while (i < DiagnosticBridge.CAP) {
+            String c0 #= DiagnosticBridge.cp("");
             this.cats.add(#c0);
-            String n0 #= RecordBridge.cp("");
+            String n0 #= DiagnosticBridge.cp("");
             this.names.add(#n0);
             i = i + 1;
         }
-        this.vals #= heap int64[(int64) RecordBridge.CAP * 8L];
+        this.vals #= heap int64[(int64) DiagnosticBridge.CAP * 8L];
         this.head = 0;
         this.tail = 0;
         this.queued = 0;
@@ -98,7 +98,7 @@ public final class RecordBridge implements DiagCallback {
      *  declaration fires the inactivation; `#=` move-out of the LOCAL
      *  transfers the one armed entry to the field. One owner, no join
      *  here. */
-    public static void start(RecordBridge b) {
+    public static void start(DiagnosticBridge b) {
         Task<int32> t = spawn drain(b);
         b.drainer #= t;
         return;
@@ -114,16 +114,16 @@ public final class RecordBridge implements DiagCallback {
     public void onRecord(DiagRecord r) {
         {
             LockGuard g #= this.mu.acquire();
-            if (this.queued >= RecordBridge.CAP) {
+            if (this.queued >= DiagnosticBridge.CAP) {
                 // §8.2.2: shedding is the policy; blocking would be
                 // token latency.
                 this.shed = this.shed + 1L;
                 return;
             }
             int32 s = this.head;
-            String c #= RecordBridge.cp(r.category);
+            String c #= DiagnosticBridge.cp(r.category);
             this.cats.set(s, #c);
-            String n #= RecordBridge.cp(r.name != null ? r.name : "-");
+            String n #= DiagnosticBridge.cp(r.name != null ? r.name : "-");
             this.names.set(s, #n);
             int64 b = (int64) s * 8L;
             this.vals[b] = r.v0;
@@ -133,7 +133,7 @@ public final class RecordBridge implements DiagCallback {
             this.vals[b + 4L] = r.v4;
             this.vals[b + 5L] = r.v5;
             this.vals[b + 6L] = (int64) r.session;
-            this.head = (this.head + 1) % RecordBridge.CAP;
+            this.head = (this.head + 1) % DiagnosticBridge.CAP;
             this.queued = this.queued + 1;
             this.enq = this.enq + 1L;
         }
@@ -143,7 +143,7 @@ public final class RecordBridge implements DiagCallback {
 
     /** The publisher loop — cabra's own fiber, never the engine's
      *  thread. Spawn it; `close()` ends it. */
-    public static async int32 drain(RecordBridge b) {
+    public static async int32 drain(DiagnosticBridge b) {
         while (true) {
             b.ready.acquire();
             String cat = null;
@@ -160,8 +160,8 @@ public final class RecordBridge implements DiagCallback {
                 LockGuard g #= b.mu.acquire();
                 if (b.queued > 0) {
                     int32 s = b.tail;
-                    cat #= RecordBridge.cp(b.cats.get(s));
-                    nm #= RecordBridge.cp(b.names.get(s));
+                    cat #= DiagnosticBridge.cp(b.cats.get(s));
+                    nm #= DiagnosticBridge.cp(b.names.get(s));
                     int64 base = (int64) s * 8L;
                     v0 = b.vals[base];
                     v1 = b.vals[base + 1L];
@@ -170,7 +170,7 @@ public final class RecordBridge implements DiagCallback {
                     v4 = b.vals[base + 4L];
                     v5 = b.vals[base + 5L];
                     sess = b.vals[base + 6L];
-                    b.tail = (b.tail + 1) % RecordBridge.CAP;
+                    b.tail = (b.tail + 1) % DiagnosticBridge.CAP;
                     b.queued = b.queued - 1;
                     have = true;
                 }

@@ -8,7 +8,7 @@ import cajeta.lang.Optional;
 import cajeta.lang.String;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
-import dev.cajeta.cabra.LineReader;
+import dev.cajeta.cabra.io.LineReader;
 
 /**
  * Plan 4.2.1, reader half. A regular file reports ALWAYS-READY from

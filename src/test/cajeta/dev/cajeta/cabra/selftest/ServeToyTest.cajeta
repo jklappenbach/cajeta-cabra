@@ -10,9 +10,9 @@ import cajeta.io.file.OpenMode;
 import cajeta.lang.String;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
-import dev.cajeta.cabra.Serve;
 import dev.cajeta.llm.EngineOptions;
 import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.cabra.stdio.Serve;
 
 /**
  * Plan 2.1.3 — the serve loop end to end over the TOY model

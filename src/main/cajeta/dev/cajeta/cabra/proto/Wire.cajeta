@@ -1,4 +1,4 @@
-package dev.cajeta.cabra;
+package dev.cajeta.cabra.proto;
 
 import cajeta.lang.String;
 

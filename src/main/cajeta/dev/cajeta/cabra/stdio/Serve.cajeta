@@ -1,4 +1,4 @@
-package dev.cajeta.cabra;
+package dev.cajeta.cabra.stdio;
 
 import cajeta.codec.json.JsonLinesWriter;
 import cajeta.collection.ArrayList;
@@ -11,6 +11,12 @@ import dev.cajeta.llm.chat.ChatTemplate;
 import dev.cajeta.llm.gen.SampleParams;
 import dev.cajeta.llm.gen.TokenSink;
 import dev.cajeta.llm.sched.Request;
+import dev.cajeta.cabra.ChatOp;
+import dev.cajeta.cabra.Main;
+import dev.cajeta.cabra.io.LineReader;
+import dev.cajeta.cabra.io.Utf8Chunker;
+import dev.cajeta.cabra.proto.Protocol;
+import dev.cajeta.cabra.proto.Req;
 
 /**
  * The serve loop (plan 2.2.3, extended by 3.2 and 4.2): requests are
@@ -415,7 +421,7 @@ public final class Serve implements TokenSink {
         this.ensureChunker();
         if (this.chunker.hasTail(slot)) {
             String tailS #= this.chunker.take(slot,
-                Host.emptyBytes(), true);
+                Utf8Chunker.emptyBytes(), true);
             if (tailS.byteLength() > 0) {
                 Protocol.emitChunk(this.out, this.trId[slot], tailS);
             }

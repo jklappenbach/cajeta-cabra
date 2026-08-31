@@ -1,6 +1,8 @@
-package dev.cajeta.cabra;
+package dev.cajeta.cabra.io;
 
 import cajeta.lang.String;
+import dev.cajeta.cabra.stdio.Serve;
+import dev.cajeta.cabra.ws.Host;
 
 /**
  * UTF-8 hold-back for streamed chunks, shared by every transport
@@ -27,6 +29,15 @@ public final class Utf8Chunker {
     int32 cap;
     int8[] pendBuf;     // cap slots x 4 bytes
     int32[] pendLen;
+
+    /** A shared zero-length-ish byte source for tail flushes. */
+    static int8[] emptyZ;
+    public static int8[] emptyBytes() {
+        if (Utf8Chunker.emptyZ == null) {
+            Utf8Chunker.emptyZ #= heap int8[1];
+        }
+        return Utf8Chunker.emptyZ;
+    }
 
     public Utf8Chunker(int32 cap) {
         this.cap = cap;

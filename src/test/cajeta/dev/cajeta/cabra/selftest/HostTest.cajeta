@@ -13,11 +13,11 @@ import cajeta.io.net.uri.Uri;
 import cajeta.lang.String;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
-import dev.cajeta.cabra.Host;
 import dev.cajeta.http.ws.WebSocket;
 import dev.cajeta.http.ws.WsMessage;
 import dev.cajeta.http.ws.WsUpgrade;
 import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.cabra.ws.Host;
 
 /**
  * Plan 7.1 — host mode over WebSocket, in-process on loopback: the

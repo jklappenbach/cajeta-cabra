@@ -1,4 +1,4 @@
-package dev.cajeta.cabra;
+package dev.cajeta.cabra.ws;
 
 import cajeta.collection.ArrayList;
 import cajeta.concurrent.Lock;
@@ -12,6 +12,7 @@ import cajeta.lang.String;
 import dev.cajeta.http.ws.WebSocket;
 import dev.cajeta.http.ws.WsMessage;
 import dev.cajeta.http.ws.WsUpgrade;
+import dev.cajeta.cabra.io.LineReader;
 
 /**
  * One host-mode connection (plan 7.2.2): owns the socket, its buffered

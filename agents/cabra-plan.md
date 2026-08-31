@@ -368,13 +368,13 @@ concurrent sequences in one engine, and the engine crashes above one at
 the default chunk.
 
 ### 7.1 TDD
-- [ ] 7.1.1 Two clients connected at once each get their own session and
+- [x] 7.1.1 Two clients connected at once each get their own session and
       their own output.
-- [ ] 7.1.2 Two clients share ONE model load — the measurement that
+- [x] 7.1.2 Two clients share ONE model load — the measurement that
       justifies host mode at all (§5.1.4).
 - [ ] 7.1.3 A client that dies without closing has its session reclaimed
       by expiry, not leaked.
-- [ ] 7.1.4 A connection without a valid token is closed before any other
+- [x] 7.1.4 A connection without a valid token is closed before any other
       op is processed.
 - [ ] 7.1.5 Beyond capacity, a request queues and later runs; beyond the
       queue bound it is shed with an explicit busy error.
@@ -385,6 +385,20 @@ the default chunk.
       unit-6 seam.
 - [x] 7.2.2 Listener, accept loop, per-connection session binding.
 - [x] 7.2.3 Token check on connect.
+
+**Unit 7 core green 2026-08-31** (HostTest live in the suite, 40/0):
+two ws clients against one engine, per-session outputs equal to their
+stdio solos BYTE-FOR-BYTE (the Utf8Chunker hold-back is one policy on
+both transports), auth gate closes unauthed connections before any op.
+The road there is a story: a real runtime reactor bug (multi-waiter
+clobber, fixed in cajeta 1bb96088), raw token bytes violating RFC 6455
+UTF-8 (CLOSE 1007), a Wire.esc placeholder rewriting controls to NUL,
+and two fiber-lifetime use-after-frees in teardown/slot-reuse (now
+joined via WsConn.stopAll). Still open: 7.1.3 (ws-level expiry-reclaim
+test), 7.1.5/7.2.4 (queue-then-run + shed policy beyond the outbox
+bound), 7.1.6 (slow-reader test — the bounded-outbox mechanism exists,
+the test does not), 7.3.1 (N-terminal manual acceptance).
+
 - [ ] 7.2.4 Capacity, queue bound and shedding.
 
 

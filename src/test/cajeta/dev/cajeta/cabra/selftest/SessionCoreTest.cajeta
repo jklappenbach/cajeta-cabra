@@ -3,14 +3,13 @@ package dev.cajeta.cabra.selftest;
 import cajeta.lang.String;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
-import dev.cajeta.cabra.ErrKind;
-import dev.cajeta.cabra.MemChannel;
-import dev.cajeta.cabra.Req;
-import dev.cajeta.cabra.ServeCore;
-import dev.cajeta.cabra.SessionRegistry;
-import dev.cajeta.cabra.TurnEmit;
-import dev.cajeta.cabra.TurnPort;
 import dev.cajeta.llm.LlmException;
+import dev.cajeta.cabra.core.MemChannel;
+import dev.cajeta.cabra.core.ServeCore;
+import dev.cajeta.cabra.core.TurnEmit;
+import dev.cajeta.cabra.core.TurnPort;
+import dev.cajeta.cabra.proto.ErrKind;
+import dev.cajeta.cabra.proto.Req;
 
 /**
  * Plan 6.1 — the session model and transport-neutral core, with no

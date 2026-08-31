@@ -4,6 +4,7 @@ import cajeta.lang.String;
 import dev.cajeta.llm.chat.ChatTemplate;
 import dev.cajeta.llm.io.GgufFile;
 import dev.cajeta.llm.tok.Tokenizer;
+import dev.cajeta.cabra.stdio.Serve;
 
 /**
  * The `chat` op's rendering half (plan 3.2.1) — messages in, prompt out,

@@ -8,9 +8,9 @@ import cajeta.io.file.OpenMode;
 import cajeta.lang.String;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
-import dev.cajeta.cabra.LineReader;
-import dev.cajeta.cabra.Serve;
 import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.cabra.io.LineReader;
+import dev.cajeta.cabra.stdio.Serve;
 
 /**
  * Plan 4.2.1, the loop half — `Serve.runLoop` fed by the reader fiber.

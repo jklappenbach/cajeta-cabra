@@ -1,4 +1,4 @@
-package dev.cajeta.cabra;
+package dev.cajeta.cabra.io;
 
 import cajeta.collection.ArrayList;
 import cajeta.concurrent.Channel;
@@ -6,6 +6,7 @@ import cajeta.concurrent.Tasks;
 import cajeta.io.file.FileReader;
 import cajeta.lang.Optional;
 import cajeta.lang.String;
+import dev.cajeta.cabra.diag.DiagnosticBridge;
 
 /**
  * Plan 4.2.1's reader half: a fiber that owns the input fd, splits it
@@ -33,7 +34,11 @@ public final class LineReader {
 
     FileReader in;             // owned
     ArrayList<String> slots;   // CAP owned strings, reused in place
-    Channel<int32> ch;         // slot indices; closed == EOF
+    // PUBLIC deliberately: callers read the channel directly
+    // (tryReceive/receive/isClosed) because an Optional relayed
+    // through a wrapper method loses its present flag - measured
+    // 2026-08-31. Cross-package since the io/ split.
+    public Channel<int32> ch;  // slot indices; closed == EOF
     int32 next;                // pump-fiber only
     boolean stop;
     boolean stopped;
@@ -62,7 +67,7 @@ public final class LineReader {
     }
 
     /** Spawn the pump. The two-step binding is load-bearing — see
-     *  `RecordBridge.start` for the measured alternatives. */
+     *  `DiagnosticBridge.start` for the measured alternatives. */
     public static void start(LineReader r) {
         Task<int32> t = spawn pump(r);
         r.pumpTask #= t;

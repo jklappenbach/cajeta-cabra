@@ -1,4 +1,4 @@
-package dev.cajeta.cabra;
+package dev.cajeta.cabra.core;
 
 import cajeta.collection.ArrayList;
 import cajeta.lang.String;

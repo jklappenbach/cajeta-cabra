@@ -1,4 +1,4 @@
-package dev.cajeta.cabra;
+package dev.cajeta.cabra.ws;
 
 import cajeta.collection.ArrayList;
 import cajeta.concurrent.Channel;
@@ -13,6 +13,13 @@ import dev.cajeta.llm.LlmEngine;
 import dev.cajeta.llm.gen.SampleParams;
 import dev.cajeta.llm.gen.TokenSink;
 import dev.cajeta.llm.sched.Request;
+import dev.cajeta.cabra.core.SessionRegistry;
+import dev.cajeta.cabra.io.Utf8Chunker;
+import dev.cajeta.cabra.proto.ErrKind;
+import dev.cajeta.cabra.proto.Protocol;
+import dev.cajeta.cabra.proto.Req;
+import dev.cajeta.cabra.proto.Wire;
+import dev.cajeta.cabra.stdio.Serve;
 
 /**
  * Host mode (spec §5.1.2, plan unit 7): one loaded model, N WebSocket
@@ -312,14 +319,6 @@ public final class Host implements TokenSink {
         return;
     }
 
-    static int8[] emptyZ;
-    static int8[] emptyBytes() {
-        if (Host.emptyZ == null) {
-            Host.emptyZ #= heap int8[1];
-        }
-        return Host.emptyZ;
-    }
-
     int32 freeReqSlot() {
         int32 i = 0;
         while (i < this.cap) {
@@ -365,7 +364,7 @@ public final class Host implements TokenSink {
                     this.ensureChunker();
                     if (this.chunker.hasTail(i)) {
                         String tailS #= this.chunker.take(i,
-                            Host.emptyBytes(), true);
+                            Utf8Chunker.emptyBytes(), true);
                         if (tailS.byteLength() > 0) {
                             String tm #= Wire.chunk(this.trId[i], tailS);
                             this.say(this.trConn[i], tm);

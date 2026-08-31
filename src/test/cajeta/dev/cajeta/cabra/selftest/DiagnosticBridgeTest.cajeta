@@ -8,8 +8,6 @@ import cajeta.lang.String;
 import cajeta.concurrent.Tasks;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
-import dev.cajeta.cabra.RecordBridge;
-import dev.cajeta.cabra.Serve;
 import dev.cajeta.llm.Diag;
 import dev.cajeta.llm.DiagCallback;
 import dev.cajeta.llm.DiagRecord;
@@ -22,6 +20,8 @@ import dev.cajeta.logging.Level;
 import dev.cajeta.logging.Log;
 import dev.cajeta.logging.Logger;
 import dev.cajeta.logging.TextEncoder;
+import dev.cajeta.cabra.diag.DiagnosticBridge;
+import dev.cajeta.cabra.stdio.Serve;
 
 /**
  * Plan unit 9 — diagnostics as records (spec §8.2; engine §11.8).
@@ -33,15 +33,15 @@ import dev.cajeta.logging.TextEncoder;
  * the split structurally: at generation end the drainer is BEHIND, so
  * the handler cannot have been doing the publishing inline.
  */
-public class RecordBridgeTest {
+public class DiagnosticBridgeTest {
 
     static final String TOY =
         "../cajeta-llm/src/test/fixtures/gguf/toy.gguf";
 
-    public RecordBridgeTest() { return; }
+    public DiagnosticBridgeTest() { return; }
 
     static #LlmEngine engine(int32 maxSeqs) {
-        EngineOptions opts = heap EngineOptions(RecordBridgeTest.TOY);
+        EngineOptions opts = heap EngineOptions(DiagnosticBridgeTest.TOY);
         opts.ctx = 128;
         opts.maxSeqs = maxSeqs;
         return #LlmEngine.load(#opts);
@@ -81,17 +81,17 @@ public class RecordBridgeTest {
     public void recordsArriveAttributedToTheirSession() {
         CapturingAppender cap #= heap CapturingAppender();
         Logger log #= Log.capturing("cabra.engine", Level.DEBUG, #cap);
-        RecordBridge b #= heap RecordBridge(#log);
-        RecordBridge.start(b);
+        DiagnosticBridge b #= heap DiagnosticBridge(#log);
+        DiagnosticBridge.start(b);
         {
             Diag.register(b);
 
-            LlmEngine e #= RecordBridgeTest.engine(2);
+            LlmEngine e #= DiagnosticBridgeTest.engine(2);
             String path = "tmp/rb-attr.jsonl";
             FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
-            Serve s = heap Serve(#e, #fw, RecordBridgeTest.TOY, 128);
-            String gA #= RecordBridgeTest.genLine(1L, "hello");
-            String gB #= RecordBridgeTest.genLine(2L,
+            Serve s = heap Serve(#e, #fw, DiagnosticBridgeTest.TOY, 128);
+            String gA #= DiagnosticBridgeTest.genLine(1L, "hello");
+            String gB #= DiagnosticBridgeTest.genLine(2L,
                 "the quick brown fox");
             s.handleLine(gA);
             s.handleLine(gB);
@@ -129,17 +129,17 @@ public class RecordBridgeTest {
         // Logger BORROWS encoder and appender (plain params); both live
         // in this frame past every use of the logger.
         Logger log #= heap Logger("cabra.engine", Level.DEBUG, enc, slow);
-        RecordBridge b #= heap RecordBridge(#log);
-        RecordBridge.start(b);
+        DiagnosticBridge b #= heap DiagnosticBridge(#log);
+        DiagnosticBridge.start(b);
         int64 lag = 0L;
         {
             Diag.register(b);
 
-            LlmEngine e #= RecordBridgeTest.engine(1);
+            LlmEngine e #= DiagnosticBridgeTest.engine(1);
             String path = "tmp/rb-slow.jsonl";
             FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
-            Serve s = heap Serve(#e, #fw, RecordBridgeTest.TOY, 128);
-            String g #= RecordBridgeTest.genLine(7L, "hello");
+            Serve s = heap Serve(#e, #fw, DiagnosticBridgeTest.TOY, 128);
+            String g #= DiagnosticBridgeTest.genLine(7L, "hello");
             s.handleLine(g);
             s.drive();
             lag = b.enqueuedCount() - b.publishedCount();
@@ -163,11 +163,11 @@ public class RecordBridgeTest {
     public void aThrowingHandlerDoesNotTakeTheTurnDown() {
         Thrower bad = heap Thrower();
         Diag.register(bad);
-        LlmEngine e #= RecordBridgeTest.engine(1);
+        LlmEngine e #= DiagnosticBridgeTest.engine(1);
         String path = "tmp/rb-throw.jsonl";
         FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
-        Serve s = heap Serve(#e, #fw, RecordBridgeTest.TOY, 128);
-        String g #= RecordBridgeTest.genLine(3L, "hello");
+        Serve s = heap Serve(#e, #fw, DiagnosticBridgeTest.TOY, 128);
+        String g #= DiagnosticBridgeTest.genLine(3L, "hello");
         s.handleLine(g);
         int32 completed = s.drive();
         s.close();
@@ -182,11 +182,11 @@ public class RecordBridgeTest {
     public void unregisteredMeansNothingIsBuilt() {
         Diag.register(null);
         int64 b0 = Diag.builtCount();
-        LlmEngine e #= RecordBridgeTest.engine(1);
+        LlmEngine e #= DiagnosticBridgeTest.engine(1);
         String path = "tmp/rb-off.jsonl";
         FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
-        Serve s = heap Serve(#e, #fw, RecordBridgeTest.TOY, 128);
-        String g #= RecordBridgeTest.genLine(4L, "hello");
+        Serve s = heap Serve(#e, #fw, DiagnosticBridgeTest.TOY, 128);
+        String g #= DiagnosticBridgeTest.genLine(4L, "hello");
         s.handleLine(g);
         s.drive();
         s.close();

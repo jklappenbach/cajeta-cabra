@@ -3,11 +3,11 @@ package dev.cajeta.cabra.selftest;
 import cajeta.lang.String;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
-import dev.cajeta.cabra.ChatOp;
 import dev.cajeta.llm.EngineOptions;
 import dev.cajeta.llm.LlmEngine;
 import dev.cajeta.llm.chat.ChatTemplate;
 import dev.cajeta.llm.tok.Tokenizer;
+import dev.cajeta.cabra.ChatOp;
 
 /**
  * Plan 3.1.1 — the `chat` op renders through THE MODEL'S template, and

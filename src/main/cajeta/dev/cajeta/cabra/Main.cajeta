@@ -13,6 +13,9 @@ import dev.cajeta.llm.chat.ChatTemplate;
 import dev.cajeta.logging.Level;
 import dev.cajeta.logging.Log;
 import dev.cajeta.logging.Logger;
+import dev.cajeta.cabra.diag.DiagnosticBridge;
+import dev.cajeta.cabra.io.LineReader;
+import dev.cajeta.cabra.stdio.Serve;
 
 /**
  * cabra — the resident-model serving harness (spec §1). A cabra is a
@@ -32,11 +35,11 @@ public final class Main {
     // at must be held by someone for as long as diagnostics are on. The
     // Task static is what keeps the drainer fiber from being joined the
     // moment it is spawned.
-    static RecordBridge bridge;
+    static DiagnosticBridge bridge;
 
     /**
      * Honor `--verbose`: consume the engine's diagnostic RECORDS (spec
-     * §8.2, engine §11.8) through `RecordBridge` — enqueue on the
+     * §8.2, engine §11.8) through `DiagnosticBridge` — enqueue on the
      * engine's thread, render + log on cabra's own drainer fiber.
      *
      * Off by default, and off means the engine BUILDS nothing at all —
@@ -51,8 +54,8 @@ public final class Main {
             // borrows the process's DI encoder+appender, so both
             // aggregate into one stream (Julian, 2026-08-30).
             Logger log #= Log.at("cabra.engine", Level.DEBUG);
-            Main.bridge #= heap RecordBridge(#log);
-            RecordBridge.start(Main.bridge);
+            Main.bridge #= heap DiagnosticBridge(#log);
+            DiagnosticBridge.start(Main.bridge);
             Diag.register(Main.bridge);
         }
         return;
