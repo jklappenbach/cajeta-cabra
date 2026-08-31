@@ -187,7 +187,7 @@ both route through it.
       object, never a hang and never a dropped line.
 
 ### 4.2 Coding
-- [ ] 4.2.1 Reader thread feeding a request queue; the serve loop
+- [x] 4.2.1 Reader thread feeding a request queue; the serve loop
       drives `stepOnce` across all in-flight requests (the scheduler's
       continuous batching — its first real multi-client caller).
       **The drive half is DONE** — `handleLine` submits, `drive()` steps
@@ -260,6 +260,17 @@ both route through it.
 
       So the blocker is now a stdlib API decision (what to expose, and
       what Windows does), not a missing runtime capability.
+      **CLOSED 2026-08-31** (LineReader + Serve.runLoop/driveStep;
+      LineReaderTest + ServeLoopTest, 30/0): the pump fiber owns the fd
+      via awaitReadable(200) poll-and-park (bounded, so close() ends it
+      on an idle stdin), splits lines with a carried tail, and sends
+      ring-slot INDICES over a bounded Channel<int32> - the plan sketch
+      verbatim. Three language traps were measured on the way and are
+      recorded in code comments: #=-spawn double-free, =-spawn-to-field
+      join-blocking the spawning frame (two-step move-out is the
+      shape), and stack-Optional RELAY losing the present flag (callers
+      read the channel directly).
+
 - [x] 4.2.2 Per-request sink demux by scheduler request id → caller id.
 
 ### 4.3 Acceptance

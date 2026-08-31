@@ -1,0 +1,146 @@
+package dev.cajeta.cabra;
+
+import cajeta.collection.ArrayList;
+import cajeta.concurrent.Channel;
+import cajeta.concurrent.Tasks;
+import cajeta.io.file.FileReader;
+import cajeta.lang.Optional;
+import cajeta.lang.String;
+
+/**
+ * Plan 4.2.1's reader half: a fiber that owns the input fd, splits it
+ * into lines, and hands SLOT INDICES over a bounded channel — so the
+ * serve loop can notice a second request while the first decodes.
+ *
+ * The int32 channel is the plan's sketch verbatim: `Channel` LENDS its
+ * slots (a buffered heap item still belongs to the sender), so heap
+ * Strings over the channel would need sender-lifetime gymnastics.
+ * Indices into a reader-owned ring sidestep that: the ring slot is
+ * overwritten only after CAP more lines, and the channel's capacity
+ * (CAP - 2) blocks the PUMP, never the serve loop, before reuse could
+ * bite. Backpressure parks the reader fiber; the engine never waits.
+ *
+ * Readiness is BYTES, not lines (`FileReader.awaitReadable`): a read
+ * can land mid-line, so the partial tail carries across passes. The
+ * wait is a bounded poll-and-park (200 ms), not an indefinite one, so
+ * `close()` can end the pump even when the fd stays open and idle —
+ * a shutdown op must not hang on a silent stdin.
+ */
+public final class LineReader {
+
+    static final int32 CAP = 64;
+    static final int32 MAXLINE = 1048576;   // a prompt line is long
+
+    FileReader in;             // owned
+    ArrayList<String> slots;   // CAP owned strings, reused in place
+    Channel<int32> ch;         // slot indices; closed == EOF
+    int32 next;                // pump-fiber only
+    boolean stop;
+    boolean stopped;
+    Task<int32> pumpTask;
+
+    public LineReader(#FileReader in) {
+        this.in #= in;
+        this.slots = heap ArrayList<String>();
+        int32 i = 0;
+        while (i < LineReader.CAP) {
+            String e #= LineReader.cp("");
+            this.slots.add(#e);
+            i = i + 1;
+        }
+        this.ch = heap Channel<int32>(LineReader.CAP - 2);
+        this.next = 0;
+        this.stop = false;
+        this.stopped = false;
+        return;
+    }
+
+    static #String cp(String s) {
+        int8[] b #= s.toBytes();
+        String c = heap String(#b, s.byteLength());
+        return #= c;
+    }
+
+    /** Spawn the pump. The two-step binding is load-bearing — see
+     *  `RecordBridge.start` for the measured alternatives. */
+    public static void start(LineReader r) {
+        Task<int32> t = spawn pump(r);
+        r.pumpTask #= t;
+        return;
+    }
+
+    static async int32 pump(LineReader r) {
+        int8[] buf = heap int8[4096];
+        int8[] tail = heap int8[LineReader.MAXLINE];
+        int32 pending = 0;
+        while (!r.stop) {
+            boolean ready = r.in.awaitReadable(200);
+            if (!ready) {
+                continue;
+            }
+            int32 n = r.in.read(buf, 4096);
+            if (n <= 0) {
+                break;    // readable + zero bytes == EOF
+            }
+            int32 i = 0;
+            while (i < n) {
+                if (buf[i] == (int8) 10) {
+                    int32 len = pending;
+                    if (len > 0 && tail[len - 1] == (int8) 13) {
+                        len = len - 1;
+                    }
+                    int8[] lb #= heap int8[len > 0 ? len : 1];
+                    int32 c = 0;
+                    while (c < len) {
+                        lb[c] = tail[c];
+                        c = c + 1;
+                    }
+                    String line = heap String(#lb, len);
+                    int32 slot = r.next;
+                    r.slots.set(slot, #line);
+                    r.next = (r.next + 1) % LineReader.CAP;
+                    // Backpressure: parks THIS fiber when the serve
+                    // loop is CAP-2 lines behind.
+                    r.ch.send(slot);
+                    pending = 0;
+                } else if (pending < LineReader.MAXLINE) {
+                    tail[pending] = buf[i];
+                    pending = pending + 1;
+                }
+                i = i + 1;
+            }
+        }
+        r.ch.close();
+        r.stopped = true;
+        return 0;
+    }
+
+    // NO poll()/take() wrappers, and that is measured, not style
+    // (2026-08-31, RdProbe A/B): a stack Optional<int32> RELAYED by
+    // value through an intermediate return arrives EMPTY — the present
+    // flag does not survive the second sret hop. Callers read the
+    // channel directly: `r.ch.tryReceive()`, `r.ch.receive()`,
+    // `r.ch.isClosed()`.
+
+    /** The line in `slot` — a BORROW of ring storage, valid until CAP
+     *  more lines have been received. Use it, don't keep it. */
+    public String lineAt(int32 slot) {
+        return this.slots.get(slot);
+    }
+
+    /** True once the pump saw EOF (or was closed) AND the channel is
+     *  drained — poll()'s empty is ambiguous without this. */
+    public boolean drained() {
+        return this.ch.isClosed();
+    }
+
+    /** End the pump even if the fd never delivers EOF (a shutdown op
+     *  with stdin still open). Waits for the fiber to exit. */
+    public void close() {
+        this.stop = true;
+        while (!this.stopped) {
+            Tasks.sleepMillis(1L);
+        }
+        return;
+    }
+}

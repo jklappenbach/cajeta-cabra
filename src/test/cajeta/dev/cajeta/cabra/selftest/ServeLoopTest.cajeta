@@ -1,0 +1,96 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.collection.ArrayList;
+import cajeta.io.file.File;
+import cajeta.io.file.FileReader;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.LineReader;
+import dev.cajeta.cabra.Serve;
+import dev.cajeta.llm.LlmEngine;
+
+/**
+ * Plan 4.2.1, the loop half — `Serve.runLoop` fed by the reader fiber.
+ * The 4.1.1 discipline carries over: scheduling may change, CONTENT
+ * may not, so both requests are asserted against their solo runs
+ * (ConcurrencyTest's harness, reused).
+ */
+public class ServeLoopTest {
+
+    public ServeLoopTest() { return; }
+
+    static void writeAll(String path, String content) {
+        FileWriter w #= File.openWrite(path, OpenMode.WRITE);
+        int8[] b #= content.toBytes();
+        w.write(b, (int32) b.count());
+        w.close();
+        return;
+    }
+
+    /** Two requests arrive through the READER (not handleLine calls),
+     *  overlap in the scheduler, and each keeps its own content. */
+    @Test
+    public void readerFedRequestsOverlapAndKeepTheirContent() {
+        String soloA #= ConcurrencyTest.serialRun("tmp/sl-solo-a.jsonl",
+            1L, ConcurrencyTest.PROMPT_A);
+        String soloB #= ConcurrencyTest.serialRun("tmp/sl-solo-b.jsonl",
+            2L, ConcurrencyTest.PROMPT_B);
+        Assert.isFalse(soloA.equals(soloB));
+
+        String gA #= ConcurrencyTest.genLine(1L, ConcurrencyTest.PROMPT_A);
+        String gB #= ConcurrencyTest.genLine(2L, ConcurrencyTest.PROMPT_B);
+        ServeLoopTest.writeAll("tmp/sl-in.jsonl", gA + "\n" + gB + "\n");
+
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        String path = "tmp/sl-out.jsonl";
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, ConcurrencyTest.TOY, 128);
+        FileReader fin #= File.openRead("tmp/sl-in.jsonl");
+        LineReader r = heap LineReader(#fin);
+        LineReader.start(r);
+        int32 completed = s.runLoop(r);
+        r.close();
+        s.close();
+
+        Assert.equals(2, completed);
+        ArrayList<String> lines #= ConcurrencyTest.linesOf(path);
+        String outA #= ConcurrencyTest.chunksFor(lines, 1L);
+        String outB #= ConcurrencyTest.chunksFor(lines, 2L);
+        Assert.isTrue(outA.equals(soloA));
+        Assert.isTrue(outB.equals(soloB));
+    }
+
+    /** A shutdown op after a generate: the loop drains the generate
+     *  (its done line arrives) and returns — 3.1.4 through the reader
+     *  path. */
+    @Test
+    public void shutdownDrainsInFlightWorkThenStops() {
+        String g #= ConcurrencyTest.genLine(9L, ConcurrencyTest.PROMPT_A);
+        ServeLoopTest.writeAll("tmp/sl-shut.jsonl",
+            g + "\n{\"op\":\"shutdown\"}\n"
+            + "{\"op\":\"generate\",\"id\":10,\"prompt\":\"after\","
+            + "\"n\":2,\"temp\":0}\n");
+
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        String path = "tmp/sl-shut-out.jsonl";
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, ConcurrencyTest.TOY, 128);
+        FileReader fin #= File.openRead("tmp/sl-shut.jsonl");
+        LineReader r = heap LineReader(#fin);
+        LineReader.start(r);
+        int32 completed = s.runLoop(r);
+        r.close();
+        s.close();
+
+        Assert.equals(1, completed);
+        ArrayList<String> lines #= ConcurrencyTest.linesOf(path);
+        String out9 #= ConcurrencyTest.chunksFor(lines, 9L);
+        Assert.isTrue(out9.byteLength() > 0);
+        // The post-shutdown request was never admitted.
+        String out10 #= ConcurrencyTest.chunksFor(lines, 10L);
+        Assert.equals((int64) 0, (int64) out10.byteLength());
+    }
+}

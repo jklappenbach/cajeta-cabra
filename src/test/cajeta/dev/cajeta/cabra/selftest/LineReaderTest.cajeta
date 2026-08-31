@@ -1,0 +1,96 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.io.file.File;
+import cajeta.io.file.FileReader;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.lang.Optional;
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.LineReader;
+
+/**
+ * Plan 4.2.1, reader half. A regular file reports ALWAYS-READY from
+ * `awaitReadable` by design, so these run the identical pump loop the
+ * serve process runs on stdin — what a file cannot exercise is the
+ * idle-fd close arm (a pipe that never EOFs), which rides with the
+ * serve integration instead.
+ */
+public class LineReaderTest {
+
+    public LineReaderTest() { return; }
+
+    static void writeAll(String path, String content) {
+        FileWriter w #= File.openWrite(path, OpenMode.WRITE);
+        int8[] b #= content.toBytes();
+        w.write(b, (int32) b.count());
+        w.close();
+        return;
+    }
+
+    static #LineReader over(String path) {
+        FileReader in #= File.openRead(path);
+        LineReader r = heap LineReader(#in);
+        LineReader.start(r);
+        return #r;
+    }
+
+    /** Readiness is BYTES: a line longer than the 4096 read buffer must
+     *  reassemble from the carried tail, and CR strips. */
+    @Test
+    public void linesReassembleAcrossReads() {
+        String big = "x";
+        int32 i = 0;
+        while (i < 13) {
+            big = big + big;    // 8192 chars
+            i = i + 1;
+        }
+        LineReaderTest.writeAll("tmp/lr-split.txt",
+            "first\r\n" + big + "\nlast\n");
+        LineReader r #= LineReaderTest.over("tmp/lr-split.txt");
+
+        Optional<int32> a = r.ch.receive();
+        Assert.isTrue(a.isPresent());
+        Assert.isTrue(r.lineAt(a.get()).equals("first"));
+
+        Optional<int32> b = r.ch.receive();
+        Assert.isTrue(b.isPresent());
+        Assert.equals((int64) 8192,
+            (int64) r.lineAt(b.get()).byteLength());
+
+        Optional<int32> c = r.ch.receive();
+        Assert.isTrue(c.isPresent());
+        Assert.isTrue(r.lineAt(c.get()).equals("last"));
+
+        // EOF: closed and drained, blocking take reports empty.
+        Optional<int32> d = r.ch.receive();
+        Assert.isTrue(d.isEmpty());
+        r.close();
+    }
+
+    /** More lines than ring slots: order survives slot reuse, and the
+     *  pump's backpressure (channel bound) never corrupts a line the
+     *  consumer has not taken yet. */
+    @Test
+    public void orderSurvivesRingReuse() {
+        String all = "";
+        int32 i = 0;
+        while (i < 84) {                 // CAP(64) + 20
+            all = all + "line-" + i + "\n";
+            i = i + 1;
+        }
+        LineReaderTest.writeAll("tmp/lr-ring.txt", all);
+        LineReader r #= LineReaderTest.over("tmp/lr-ring.txt");
+        i = 0;
+        while (i < 84) {
+            Optional<int32> got = r.ch.receive();
+            Assert.isTrue(got.isPresent());
+            Assert.isTrue(r.lineAt(got.get()).equals("line-" + i));
+            i = i + 1;
+        }
+        Optional<int32> end = r.ch.receive();
+        Assert.isTrue(end.isEmpty());
+        r.close();
+    }
+}

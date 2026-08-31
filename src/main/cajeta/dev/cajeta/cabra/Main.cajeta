@@ -128,29 +128,14 @@ public final class Main {
         System.stderr.println("cabra: ready (jsonl on stdin; "
             + "{\"op\":\"shutdown\"} or EOF exits)");
 
-        FileReader in = heap FileReader(0);
-        while (true) {
-            String line #= Main.readLine(in);
-            if (line == null) {
-                break;
-            }
-            if (line.equals("")) {
-                continue;
-            }
-            if (!s.handleLine(line)) {
-                break;
-            }
-            // Submit-then-drive. Without a non-blocking stdin there is no
-            // way to notice a SECOND line while the first is decoding, so
-            // v1 drives after each line and requests do not actually
-            // overlap here — the batching machinery is exercised, the
-            // concurrency is not. Plan 4.2.1's reader fiber is what lets
-            // lines arrive during a drive; until then this is honest
-            // serial behaviour through the multiplexed path.
-            s.drive();
-        }
-        // EOF with work still in flight: finish it before exiting.
-        s.drive();
+        // 4.2.1: the reader FIBER owns stdin (awaitReadable poll-and-
+        // park), the serve loop owns every engine call, and lines are
+        // admitted mid-generation — requests genuinely overlap now.
+        FileReader stdin0 #= heap FileReader(0);
+        LineReader r = heap LineReader(#stdin0);
+        LineReader.start(r);
+        s.runLoop(r);
+        r.close();
         // Let the drainer publish what generation enqueued, then stop
         // it, so the static Task's exit-time join terminates.
         if (Main.bridge != null) {

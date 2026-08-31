@@ -3,6 +3,7 @@ package dev.cajeta.cabra;
 import cajeta.codec.json.JsonLinesWriter;
 import cajeta.collection.ArrayList;
 import cajeta.io.file.FileWriter;
+import cajeta.lang.Optional;
 import cajeta.lang.String;
 import cajeta.time.Clock;
 import dev.cajeta.llm.LlmEngine;
@@ -290,6 +291,90 @@ public final class Serve implements TokenSink {
         // finished the last request.
         completed = completed + this.reapFinished();
         return completed;
+    }
+
+    /**
+     * ONE scheduler step plus a reap — the reader-loop quantum (4.2.1).
+     * `drive()` runs to completion and cannot notice a line that
+     * arrives mid-generation; the serve loop interleaves THIS with the
+     * reader's channel instead. Stall protection carries over:
+     * consecutive stepped-without-completing quanta beyond the drive
+     * bound fail the in-flight set the same way drive() would.
+     */
+    public int32 driveStep() {
+        if (this.live == 0) {
+            this.idleSteps = 0;
+            return 0;
+        }
+        int32 completed = 0;
+        try {
+            this.engine.stepOnce();
+        } catch (Throwable t) {
+            this.failAllOpen("generation failed: " + t.getMessage());
+            return completed;
+        }
+        completed = this.reapFinished();
+        if (completed > 0) {
+            this.idleSteps = 0;
+        } else {
+            this.idleSteps = this.idleSteps + 1;
+            if (this.idleSteps > this.driveBound()) {
+                this.failAllOpen("scheduler made no progress within "
+                    + this.idleSteps + " steps");
+                this.idleSteps = 0;
+            }
+        }
+        return completed;
+    }
+
+    int32 idleSteps;
+
+    /**
+     * The reader-fed serve loop (4.2.1): lines are admitted the moment
+     * they arrive — including MID-generation, which is what the
+     * reader fiber exists for — and every engine call stays on THIS
+     * thread. Returns total completed requests. Ends at EOF (channel
+     * closed and drained) or when an op asks to stop, after finishing
+     * whatever is in flight.
+     */
+    public int32 runLoop(LineReader r) {
+        int32 completed = 0;
+        boolean ending = false;
+        while (true) {
+            if (this.live > 0) {
+                completed = completed + this.driveStep();
+                // Absorb everything that arrived during the step.
+                boolean absorbing = !ending;
+                while (absorbing) {
+                    Optional<int32> got = r.ch.tryReceive();
+                    if (got.isPresent()) {
+                        String line = r.lineAt(got.get());
+                        if (line.byteLength() > 0
+                                && !this.handleLine(line)) {
+                            ending = true;
+                            absorbing = false;
+                        }
+                    } else {
+                        absorbing = false;
+                        if (r.drained()) {
+                            ending = true;
+                        }
+                    }
+                }
+            } else if (ending) {
+                return completed;
+            } else {
+                // Idle: park until the next line or EOF.
+                Optional<int32> got = r.ch.receive();
+                if (got.isEmpty()) {
+                    return completed;
+                }
+                String line = r.lineAt(got.get());
+                if (line.byteLength() > 0 && !this.handleLine(line)) {
+                    ending = true;
+                }
+            }
+        }
     }
 
     int32 driveBound() {
