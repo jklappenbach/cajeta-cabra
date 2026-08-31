@@ -315,39 +315,50 @@ both route through it.
 here is testable without a socket, a pipe or a model.*
 
 ### 6.1 TDD
-- [ ] 6.1.1 An opened session returns an id, and a message naming it is
+- [x] 6.1.1 An opened session returns an id, and a message naming it is
       routed to it.
-- [ ] 6.1.2 A session survives its connection: closing and reattaching by
+- [x] 6.1.2 A session survives its connection: closing and reattaching by
       id reaches the same session, with its context still warm.
-- [ ] 6.1.3 A message naming an expired or unknown session is refused
+- [x] 6.1.3 A message naming an expired or unknown session is refused
       explicitly, NOT given a silently fresh one (§5.2.5) — a client that
       cannot tell the difference will assume its context is cached when
       it is gone.
-- [ ] 6.1.4 An idle session past its expiry is reclaimed, and its slot
+- [x] 6.1.4 An idle session past its expiry is reclaimed, and its slot
       returns to the pool.
-- [ ] 6.1.5 Two sessions on one channel do not perturb each other's
+- [x] 6.1.5 Two sessions on one channel do not perturb each other's
       output, cancellation or parameters.
-- [ ] 6.1.6 Each error kind (§4.5.2) is produced by the condition that
+- [x] 6.1.6 Each error kind (§4.5.2) is produced by the condition that
       should produce it, and carries its kind rather than only text.
-- [ ] 6.1.7 An error AFTER tokens have streamed terminates the turn with
+- [x] 6.1.7 An error AFTER tokens have streamed terminates the turn with
       reason `error`, distinguishably from one before generation starts.
-- [ ] 6.1.8 NEGATIVE ARM: classification never reads engine exception
+- [x] 6.1.8 NEGATIVE ARM: classification never reads engine exception
       text. Change an `LlmException` message and every kind still
       resolves the same way.
 
 ### 6.2 Coding
-- [ ] 6.2.1 The channel seam: read a message, write a message, close.
-- [ ] 6.2.2 An in-memory channel implementing it, so 6.1.* run with no
+- [x] 6.2.1 The channel seam: read a message, write a message, close.
+- [x] 6.2.2 An in-memory channel implementing it, so 6.1.* run with no
       I/O.
-- [ ] 6.2.3 Session registry: open, resume by id, close, expire.
-- [ ] 6.2.4 Error kinds and the `error` terminating reason.
-- [ ] 6.2.5 The serving core, transport-blind: it never branches on which
+- [x] 6.2.3 Session registry: open, resume by id, close, expire.
+- [x] 6.2.4 Error kinds and the `error` terminating reason.
+- [x] 6.2.5 The serving core, transport-blind: it never branches on which
       transport carries it.
 
 ### 6.3 Acceptance
-- [ ] 6.3.1 The whole unit runs without a model, a socket or a pipe.
-- [ ] 6.3.2 The stdio transport (§3) is re-expressed over the seam with
+- [x] 6.3.1 The whole unit runs without a model, a socket or a pipe.
+- [~] 6.3.2 The stdio transport (§3) is re-expressed over the seam with
       its behaviour unchanged — same op set, same ids.
+
+**Unit 6 landed 2026-08-31** (SessionCoreTest, 38/0): MsgChannel seam +
+MemChannel, ErrKind (structural, 6.1.8 pinned by a throw whose text
+NAMES other kinds), SessionRegistry (scripted clock; OPEN/GONE/UNKNOWN
+three-valued so 5.2.5 can say WHICH), Wire renderers, ServeCore with
+the 4.4 pre/post-stream error split. 6.3.2 is deliberately [~]: the
+unit-6 TurnPort drives a turn synchronously, which is right for a
+scripted port and WRONG for the engine - real turns must be
+submit-based so sessions interleave (7.1.6). The stdio re-expression
+rides with unit 7's engine adapter rather than forcing a blocking
+regression now.
 
 ## 7. Host mode over WebSocket
 

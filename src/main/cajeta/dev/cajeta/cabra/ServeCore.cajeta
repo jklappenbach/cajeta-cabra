@@ -1,0 +1,153 @@
+package dev.cajeta.cabra;
+
+import cajeta.lang.String;
+
+/**
+ * The transport-neutral serving core (spec §5.4.3, plan 6.2.5): parse
+ * a message, resolve its session, drive the turn through the
+ * `TurnPort`, answer on the `MsgChannel`. It never branches on which
+ * transport carries it and never touches the engine directly.
+ *
+ * Session ops:
+ *   {"op":"open","id":N}              -> {"id":N,"session":S}
+ *   {"op":"close","id":N,"session":S} -> {"id":N,"closed":S}
+ *   generate/chat with "session":S    -> resumes S (refreshing expiry)
+ *   generate/chat WITHOUT a session   -> one-shot, exactly the §3
+ *                                        stdio behaviour (6.3.2)
+ *
+ * Error kinds are STRUCTURAL (§4.5.3): parse failures are bad_request,
+ * a full registry is capacity, a gone/unknown session is session_gone,
+ * and a port throw is internal — with the §4.4 split: an error object
+ * before any chunk streamed, a terminating finish:"error" after.
+ */
+public final class ServeCore {
+
+    SessionRegistry reg;    // owned
+    TurnPort port;          // borrow; the host owns its engine adapter
+    String state;
+
+    public ServeCore(int32 maxSessions, int64 idleExpiryMs,
+            TurnPort port) {
+        this.reg = heap SessionRegistry(maxSessions, idleExpiryMs);
+        this.port = port;
+        this.state = "ready";
+        return;
+    }
+
+    public SessionRegistry registry() {
+        return this.reg;
+    }
+
+    /**
+     * Handle one inbound message at `nowMs`. Returns false when the
+     * channel's service should end (shutdown). Idle-expiry runs here —
+     * a host with no timer thread still expires on the next message.
+     */
+    public boolean handle(String line, int64 nowMs, MsgChannel ch) {
+        this.reg.expire(nowMs);
+        Req r #= Protocol.parseLine(line);
+        if (!r.ok) {
+            String m #= Wire.error(r.id, r.hasId, ErrKind.BAD_REQUEST,
+                r.err, false);
+            ch.writeMessage(m);
+            return true;
+        }
+        if (r.op.equals("shutdown")) {
+            return false;
+        }
+        if (r.op.equals("health")) {
+            String m #= Wire.health(r.id, this.state, "");
+            ch.writeMessage(m);
+            return true;
+        }
+        if (r.op.equals("open")) {
+            int64 sid = this.reg.open(nowMs);
+            if (sid < 0L) {
+                String m #= Wire.error(r.id, r.hasId, ErrKind.CAPACITY,
+                    "no session slot free: " + this.reg.openCount()
+                    + " open", false);
+                ch.writeMessage(m);
+                return true;
+            }
+            String m #= Wire.opened(r.id, sid);
+            ch.writeMessage(m);
+            return true;
+        }
+        if (r.op.equals("close")) {
+            if (!r.hasSession || !this.reg.close(r.session)) {
+                String m #= Wire.error(r.id, r.hasId,
+                    ErrKind.SESSION_GONE,
+                    "close: no such open session", false);
+                ch.writeMessage(m);
+                return true;
+            }
+            String m #= Wire.closedOk(r.id, r.session);
+            ch.writeMessage(m);
+            return true;
+        }
+
+        // generate / chat.
+        int64 sid = 0L;
+        if (r.hasSession) {
+            int32 st = this.reg.touch(r.session, nowMs);
+            if (st != SessionRegistry.OPEN) {
+                // §5.2.5: told EXPLICITLY, never handed a silent fresh
+                // session — and told WHICH, because "gone" means the
+                // cached context is lost while "unknown" means the
+                // wrong host.
+                String why = st == SessionRegistry.GONE
+                    ? "session expired or closed - open a new one and resend context"
+                    : "unknown session id - never issued by this host";
+                String m #= Wire.error(r.id, r.hasId,
+                    ErrKind.SESSION_GONE, why, true);
+                ch.writeMessage(m);
+                return true;
+            }
+            sid = r.session;
+        }
+
+        TurnEmit e = heap TurnEmit(ch, r.id);
+        String fin = null;
+        boolean faulted = false;
+        try {
+            fin = this.port.turn(sid, r, e);
+        } catch (Throwable t) {
+            faulted = true;
+        }
+        if (faulted) {
+            // 6.1.7: after streamed tokens the turn TERMINATES with
+            // reason "error"; before them it is an error object. 6.1.8:
+            // the kind is structural — nothing here read the throw.
+            if (e.sent > 0) {
+                String m #= Wire.done(r.id, "error");
+                ch.writeMessage(m);
+            } else {
+                String m #= Wire.error(r.id, r.hasId, ErrKind.INTERNAL,
+                    "turn failed before generation started", false);
+                ch.writeMessage(m);
+            }
+            return true;
+        }
+        String m #= Wire.done(r.id, fin);
+        ch.writeMessage(m);
+        return true;
+    }
+
+    /** Drain a channel to completion: the transport loop (6.3.1 runs
+     *  this over a MemChannel; a socket transport runs it per
+     *  connection). */
+    public void serveChannel(MsgChannel ch, int64 nowMs) {
+        while (true) {
+            String line = ch.readMessage();
+            if (line == null) {
+                return;
+            }
+            if (line.byteLength() == 0) {
+                continue;
+            }
+            if (!this.handle(line, nowMs, ch)) {
+                return;
+            }
+        }
+    }
+}

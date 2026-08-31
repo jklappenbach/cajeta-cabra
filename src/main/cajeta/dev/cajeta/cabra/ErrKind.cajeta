@@ -1,0 +1,28 @@
+package dev.cajeta.cabra;
+
+import cajeta.lang.String;
+
+/**
+ * Protocol error KINDS (spec §4.5, plan 6.2.4): the set of responses a
+ * client can actually make, not a taxonomy of what went wrong.
+ *
+ *   bad_request     — fix and resend
+ *   capacity        — back off and retry
+ *   session_gone    — open a new session, resend context
+ *   model_mismatch  — fatal for this host
+ *   internal        — report, do not retry
+ *
+ * Classification is STRUCTURAL (§4.5.3): a kind comes from which check
+ * failed or which seam refused, never from matching engine exception
+ * text — 6.1.8 pins that by changing a message and watching nothing
+ * move.
+ */
+public final class ErrKind {
+    public static final String BAD_REQUEST = "bad_request";
+    public static final String CAPACITY = "capacity";
+    public static final String SESSION_GONE = "session_gone";
+    public static final String MODEL_MISMATCH = "model_mismatch";
+    public static final String INTERNAL = "internal";
+
+    public ErrKind() { return; }
+}

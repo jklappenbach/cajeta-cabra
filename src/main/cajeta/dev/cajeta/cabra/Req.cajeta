@@ -22,6 +22,12 @@ public final class Req {
     public boolean hasId;
     public int64 id;
 
+    // Session addressing (spec 5.2.1): present when the request names
+    // the conversation it belongs to; absent = one-shot, the original
+    // stdio behaviour.
+    public boolean hasSession;
+    public int64 session;
+
     public String prompt;      // generate
     public String messagesRaw; // chat: the messages array re-serialized
 
@@ -48,6 +54,8 @@ public final class Req {
         this.op = "";
         this.hasId = false;
         this.id = 0L;
+        this.hasSession = false;
+        this.session = 0L;
         this.prompt = "";
         this.messagesRaw = "";
         this.n = 256;

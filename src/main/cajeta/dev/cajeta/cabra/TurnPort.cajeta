@@ -1,0 +1,20 @@
+package dev.cajeta.cabra;
+
+import cajeta.lang.String;
+
+/**
+ * The engine seam the transport-neutral core drives turns through
+ * (plan 6.2.5's "transport-blind" half has an engine-blind twin: unit
+ * 6 runs with a scripted port, unit 7 adapts the real engine behind
+ * this).
+ *
+ * Emit chunks through `e`; return the finish reason ("eos", "stop",
+ * "budget"). Throw for a fault — the CORE maps the throw: an error
+ * object (kind=internal) when nothing streamed yet, a terminating
+ * `finish:"error"` done-line when chunks already went out (§4.4,
+ * 6.1.7). The port never classifies and the core never reads the
+ * throw's text into a kind (6.1.8).
+ */
+public interface TurnPort {
+    public String turn(int64 session, Req r, TurnEmit e);
+}

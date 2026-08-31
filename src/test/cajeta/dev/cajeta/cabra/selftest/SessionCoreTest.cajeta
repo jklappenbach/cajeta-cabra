@@ -1,0 +1,231 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.ErrKind;
+import dev.cajeta.cabra.MemChannel;
+import dev.cajeta.cabra.Req;
+import dev.cajeta.cabra.ServeCore;
+import dev.cajeta.cabra.SessionRegistry;
+import dev.cajeta.cabra.TurnEmit;
+import dev.cajeta.cabra.TurnPort;
+import dev.cajeta.llm.LlmException;
+
+/**
+ * Plan 6.1 — the session model and transport-neutral core, with no
+ * socket, pipe, or model anywhere in the unit (6.3.1). The port is
+ * scripted; the channel is memory; time is a number the tests own.
+ */
+public class SessionCoreTest {
+
+    /** Scripted engine: echoes per-session state so isolation is
+     *  observable, and faults on cue for the error arms. */
+    static class FakePort implements TurnPort {
+        public int32 turns;
+        public int32 chunksBeforeFault;   // -1 = never fault
+        public String msg;                // the throw's text (6.1.8)
+        public FakePort() {
+            this.turns = 0;
+            this.chunksBeforeFault = 0 - 1;
+            this.msg = "fault";
+        }
+        public String turn(int64 session, Req r, TurnEmit e) {
+            this.turns = this.turns + 1;
+            int32 i = 0;
+            while (i < 2) {
+                if (this.chunksBeforeFault >= 0
+                        && i >= this.chunksBeforeFault) {
+                    throw heap LlmException(this.msg);
+                }
+                e.chunk("s" + session + "-" + r.prompt + "-" + i);
+                i = i + 1;
+            }
+            if (this.chunksBeforeFault >= 0) {
+                throw heap LlmException(this.msg);
+            }
+            return "eos";
+        }
+    }
+
+    public SessionCoreTest() { return; }
+
+    static #ServeCore core(FakePort p) {
+        ServeCore c = heap ServeCore(2, 1000L, p);
+        return #c;
+    }
+
+    static boolean anyOutContains(MemChannel ch, String needle) {
+        int32 i = 0;
+        while (i < ch.outCount()) {
+            if (ch.outAt(i).contains(needle)) { return true; }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    /** 6.1.1 — an opened session returns an id, and a message naming
+     *  it is routed to it (the port sees the session). */
+    @Test
+    public void openReturnsAnIdAndMessagesRouteToIt() {
+        FakePort p = heap FakePort();
+        ServeCore c #= SessionCoreTest.core(p);
+        MemChannel ch = heap MemChannel();
+        c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        Assert.isTrue(ch.outAt(0).contains("\"session\":1"));
+        c.handle("{\"op\":\"generate\",\"id\":2,\"session\":1,"
+            + "\"prompt\":\"a\",\"n\":2}", 10L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s1-a-0"));
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch,
+            "\"finish\":\"eos\""));
+        Assert.equals(1L, (int64) p.turns);
+    }
+
+    /** 6.1.2 — a session survives its connection: a SECOND channel
+     *  naming the id reaches the same session, still warm. */
+    @Test
+    public void aSessionSurvivesItsConnection() {
+        FakePort p = heap FakePort();
+        ServeCore c #= SessionCoreTest.core(p);
+        MemChannel ch1 = heap MemChannel();
+        c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch1);
+        ch1.closeChannel();
+
+        MemChannel ch2 = heap MemChannel();
+        c.handle("{\"op\":\"generate\",\"id\":3,\"session\":1,"
+            + "\"prompt\":\"b\",\"n\":2}", 100L, ch2);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch2, "s1-b-0"));
+        Assert.equals(1, c.registry().openCount());
+    }
+
+    /** 6.1.3 — an expired or unknown session is REFUSED explicitly,
+     *  never silently replaced, and the refusal says which. */
+    @Test
+    public void goneAndUnknownSessionsAreRefusedDistinctly() {
+        FakePort p = heap FakePort();
+        ServeCore c #= SessionCoreTest.core(p);
+        MemChannel ch = heap MemChannel();
+        c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        // Idle past the 1000ms expiry; the next message reclaims it.
+        c.handle("{\"op\":\"generate\",\"id\":2,\"session\":1,"
+            + "\"prompt\":\"x\",\"n\":2}", 5000L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch,
+            ErrKind.SESSION_GONE));
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "expired"));
+        // Never issued: a different refusal, same kind.
+        c.handle("{\"op\":\"generate\",\"id\":3,\"session\":77,"
+            + "\"prompt\":\"x\",\"n\":2}", 5001L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "unknown"));
+        // Neither ran a turn, and no fresh session appeared.
+        Assert.equals(0L, (int64) p.turns);
+        Assert.equals(0, c.registry().openCount());
+    }
+
+    /** 6.1.4 — expiry returns the slot to the pool: a full registry
+     *  refuses with kind=capacity, then admits after idle reclaim. */
+    @Test
+    public void expiryReturnsTheSlotToThePool() {
+        FakePort p = heap FakePort();
+        ServeCore c #= SessionCoreTest.core(p);
+        MemChannel ch = heap MemChannel();
+        c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        c.handle("{\"op\":\"open\",\"id\":2}", 0L, ch);
+        c.handle("{\"op\":\"open\",\"id\":3}", 1L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch,
+            ErrKind.CAPACITY));
+        // Both idle out; the next open succeeds.
+        c.handle("{\"op\":\"open\",\"id\":4}", 9000L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch,
+            "\"id\":4,\"session\":3"));
+        Assert.equals(1, c.registry().openCount());
+    }
+
+    /** 6.1.5 — two sessions on ONE channel do not perturb each other:
+     *  each turn's chunks carry its own session's state. */
+    @Test
+    public void twoSessionsOnOneChannelStayIsolated() {
+        FakePort p = heap FakePort();
+        ServeCore c #= SessionCoreTest.core(p);
+        MemChannel ch = heap MemChannel();
+        ch.pushIn("{\"op\":\"open\",\"id\":1}");
+        ch.pushIn("{\"op\":\"open\",\"id\":2}");
+        ch.pushIn("{\"op\":\"generate\",\"id\":3,\"session\":1,"
+            + "\"prompt\":\"a\",\"n\":2}");
+        ch.pushIn("{\"op\":\"generate\",\"id\":4,\"session\":2,"
+            + "\"prompt\":\"b\",\"n\":2}");
+        c.serveChannel(ch, 0L);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s1-a-0"));
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s2-b-0"));
+        Assert.isFalse(SessionCoreTest.anyOutContains(ch, "s1-b"));
+        Assert.isFalse(SessionCoreTest.anyOutContains(ch, "s2-a"));
+    }
+
+    /** 6.1.6 — each kind from the condition that should produce it,
+     *  as a KIND, not just text. */
+    @Test
+    public void kindsComeFromTheirConditions() {
+        FakePort p = heap FakePort();
+        ServeCore c #= SessionCoreTest.core(p);
+        MemChannel ch = heap MemChannel();
+        c.handle("this is not json", 0L, ch);
+        Assert.isTrue(ch.outAt(0).contains(ErrKind.BAD_REQUEST));
+        c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        c.handle("{\"op\":\"open\",\"id\":2}", 0L, ch);
+        c.handle("{\"op\":\"open\",\"id\":3}", 1L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch,
+            ErrKind.CAPACITY));
+        c.handle("{\"op\":\"generate\",\"id\":5,\"session\":99,"
+            + "\"prompt\":\"x\"}", 2L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch,
+            ErrKind.SESSION_GONE));
+        p.chunksBeforeFault = 0;
+        c.handle("{\"op\":\"generate\",\"id\":6,\"session\":1,"
+            + "\"prompt\":\"x\"}", 3L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch,
+            ErrKind.INTERNAL));
+    }
+
+    /** 6.1.7 — an error AFTER tokens streamed terminates with reason
+     *  `error`; one BEFORE generation is an error object. */
+    @Test
+    public void postStreamErrorsTerminateDistinguishably() {
+        FakePort p = heap FakePort();
+        ServeCore c #= SessionCoreTest.core(p);
+        MemChannel ch = heap MemChannel();
+        c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        // Fault BEFORE any chunk: an error object, no done line.
+        p.chunksBeforeFault = 0;
+        c.handle("{\"op\":\"generate\",\"id\":2,\"session\":1,"
+            + "\"prompt\":\"x\"}", 1L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch,
+            ErrKind.INTERNAL));
+        Assert.isFalse(SessionCoreTest.anyOutContains(ch,
+            "\"finish\":\"error\""));
+        // Fault AFTER one chunk: a terminating done with reason error.
+        p.chunksBeforeFault = 1;
+        c.handle("{\"op\":\"generate\",\"id\":3,\"session\":1,"
+            + "\"prompt\":\"y\"}", 2L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s1-y-0"));
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch,
+            "\"finish\":\"error\""));
+    }
+
+    /** 6.1.8 — NEGATIVE ARM: classification never reads the engine
+     *  exception text. Change the message; every kind resolves the
+     *  same. */
+    @Test
+    public void classificationNeverReadsExceptionText() {
+        FakePort p = heap FakePort();
+        p.chunksBeforeFault = 0;
+        p.msg = "capacity session_gone bad_request model_mismatch";
+        ServeCore c #= SessionCoreTest.core(p);
+        MemChannel ch = heap MemChannel();
+        c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        c.handle("{\"op\":\"generate\",\"id\":2,\"session\":1,"
+            + "\"prompt\":\"x\"}", 1L, ch);
+        // The throw's text NAMES other kinds; the answer is still
+        // internal, because the kind came from the seam, not the text.
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch,
+            ErrKind.INTERNAL));
+    }
+}

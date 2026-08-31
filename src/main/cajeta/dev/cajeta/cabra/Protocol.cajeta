@@ -52,7 +52,14 @@ public final class Protocol {
         String op #= opv.asString();
         r.op = op;
 
-        if (op.equals("health") || op.equals("shutdown")) {
+        JsonValue sv0 = o.get("session");
+        if (sv0 != null && sv0.kind() == JsonValue.NUMBER) {
+            r.hasSession = true;
+            r.session = sv0.asInt64();
+        }
+
+        if (op.equals("health") || op.equals("shutdown")
+                || op.equals("open") || op.equals("close")) {
             r.ok = true;
             return #r;
         }

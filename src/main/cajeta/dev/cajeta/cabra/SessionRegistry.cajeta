@@ -1,0 +1,112 @@
+package dev.cajeta.cabra;
+
+import cajeta.lang.String;
+
+/**
+ * The session registry (spec §5.2, plan 6.2.3): open, resume by id,
+ * close, expire. A session is one conversation's claim on the host —
+ * NOT bound to a connection (§5.2.2), so a reconnect resumes by id and
+ * the prefix cache stays warm.
+ *
+ * Time is a PARAMETER, never read here: expiry logic is testable with
+ * a scripted clock, and the caller owns "now".
+ *
+ * Resolution is three-valued on purpose (§5.2.5): OPEN, GONE (existed,
+ * now expired or closed), UNKNOWN (never issued). A client is told
+ * which — "gone" means its context left the cache; "unknown" means it
+ * is talking to the wrong host. Ids are monotonic, so the distinction
+ * costs one compare against `nextId`.
+ */
+public final class SessionRegistry {
+
+    public static final int32 OPEN = 0;
+    public static final int32 GONE = 1;
+    public static final int32 UNKNOWN = 2;
+
+    int32 capacity;
+    int64 idleExpiryMs;
+    int64 nextId;
+    int64[] ids;        // capacity entries; 0 = free slot
+    int64[] lastMs;
+
+    public SessionRegistry(int32 capacity, int64 idleExpiryMs) {
+        this.capacity = capacity;
+        this.idleExpiryMs = idleExpiryMs;
+        this.nextId = 1L;
+        this.ids #= heap int64[capacity];
+        this.lastMs #= heap int64[capacity];
+        return;
+    }
+
+    /** Open a session: its id, or -1 when every slot is held (the
+     *  caller answers with kind=capacity). */
+    public int64 open(int64 nowMs) {
+        int32 i = 0;
+        while (i < this.capacity) {
+            if (this.ids[i] == 0L) {
+                int64 sid = this.nextId;
+                this.nextId = this.nextId + 1L;
+                this.ids[i] = sid;
+                this.lastMs[i] = nowMs;
+                return sid;
+            }
+            i = i + 1;
+        }
+        return 0L - 1L;
+    }
+
+    /** Resolve `sid` and, when OPEN, refresh its idle clock. */
+    public int32 touch(int64 sid, int64 nowMs) {
+        int32 i = 0;
+        while (i < this.capacity) {
+            if (this.ids[i] == sid) {
+                this.lastMs[i] = nowMs;
+                return SessionRegistry.OPEN;
+            }
+            i = i + 1;
+        }
+        if (sid > 0L && sid < this.nextId) {
+            return SessionRegistry.GONE;
+        }
+        return SessionRegistry.UNKNOWN;
+    }
+
+    /** Close explicitly; the slot returns to the pool (§5.2.3). */
+    public boolean close(int64 sid) {
+        int32 i = 0;
+        while (i < this.capacity) {
+            if (this.ids[i] == sid) {
+                this.ids[i] = 0L;
+                return true;
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+
+    /** Reclaim every session idle past expiry (§5.2.4) — the only
+     *  reclamation for a client that vanished. Returns how many. */
+    public int32 expire(int64 nowMs) {
+        int32 n = 0;
+        int32 i = 0;
+        while (i < this.capacity) {
+            if (this.ids[i] != 0L
+                    && nowMs - this.lastMs[i] > this.idleExpiryMs) {
+                this.ids[i] = 0L;
+                n = n + 1;
+            }
+            i = i + 1;
+        }
+        return n;
+    }
+
+    public int32 openCount() {
+        int32 n = 0;
+        int32 i = 0;
+        while (i < this.capacity) {
+            if (this.ids[i] != 0L) { n = n + 1; }
+            i = i + 1;
+        }
+        return n;
+    }
+}

@@ -1,0 +1,22 @@
+package dev.cajeta.cabra;
+
+import cajeta.lang.String;
+
+/**
+ * The transport seam (spec §5.4.3, plan 6.2.1): read a message, write a
+ * message, close. The serving core never branches on what carries it —
+ * stdio, WebSocket, and the in-memory test channel all implement THIS.
+ *
+ * Messages are whole protocol lines/frames as strings; framing is the
+ * transport's business (newlines on stdio, ws frames on a socket, and
+ * nothing at all in memory).
+ */
+public interface MsgChannel {
+    /** The next inbound message, or null when the channel is closed and
+     *  drained. (A String, not an Optional: an Optional relayed through
+     *  a seam method loses its present flag — measured 2026-08-31.) */
+    public String readMessage();
+    public void writeMessage(String m);
+    public void closeChannel();
+    public boolean channelClosed();
+}

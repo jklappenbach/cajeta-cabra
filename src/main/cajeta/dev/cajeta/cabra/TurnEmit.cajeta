@@ -1,0 +1,30 @@
+package dev.cajeta.cabra;
+
+import cajeta.lang.String;
+
+/**
+ * The core's chunk writer, handed to a `TurnPort`: renders each chunk
+ * onto the channel under the request's wire id and COUNTS them —
+ * `sent` is how the core knows whether a fault happened before or
+ * after streaming began (§4.4).
+ */
+public final class TurnEmit {
+
+    MsgChannel ch;   // borrow; valid for the turn
+    int64 id;
+    public int32 sent;
+
+    public TurnEmit(MsgChannel ch, int64 id) {
+        this.ch = ch;
+        this.id = id;
+        this.sent = 0;
+        return;
+    }
+
+    public void chunk(String text) {
+        String m #= Wire.chunk(this.id, text);
+        this.ch.writeMessage(m);
+        this.sent = this.sent + 1;
+        return;
+    }
+}

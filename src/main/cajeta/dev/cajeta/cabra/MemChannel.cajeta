@@ -1,0 +1,69 @@
+package dev.cajeta.cabra;
+
+import cajeta.collection.ArrayList;
+import cajeta.lang.String;
+
+/**
+ * The in-memory `MsgChannel` (plan 6.2.2): the whole session model runs
+ * against this with no socket, pipe, or model. Single-threaded by
+ * design — a test scripts the inbox, drives the core, then reads the
+ * outbox.
+ */
+public final class MemChannel implements MsgChannel {
+
+    ArrayList<String> inbox;    // owned copies
+    int32 nextIn;
+    ArrayList<String> outbox;   // owned copies
+    boolean closed;
+
+    public MemChannel() {
+        this.inbox = heap ArrayList<String>();
+        this.nextIn = 0;
+        this.outbox = heap ArrayList<String>();
+        this.closed = false;
+        return;
+    }
+
+    static #String cp(String s) {
+        int8[] b #= s.toBytes();
+        String c = heap String(#b, s.byteLength());
+        return #= c;
+    }
+
+    /** Script one inbound message. */
+    public void pushIn(String m) {
+        this.inbox.add(#MemChannel.cp(m));
+        return;
+    }
+
+    public String readMessage() {
+        if (this.closed || this.nextIn >= this.inbox.count()) {
+            return null;
+        }
+        String m = this.inbox.get(this.nextIn);
+        this.nextIn = this.nextIn + 1;
+        return m;
+    }
+
+    public void writeMessage(String m) {
+        this.outbox.add(#MemChannel.cp(m));
+        return;
+    }
+
+    public void closeChannel() {
+        this.closed = true;
+        return;
+    }
+
+    public boolean channelClosed() {
+        return this.closed;
+    }
+
+    public int32 outCount() {
+        return this.outbox.count();
+    }
+
+    public String outAt(int32 i) {
+        return this.outbox.get(i);
+    }
+}
