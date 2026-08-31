@@ -56,6 +56,7 @@ public final class WsConn {
 
     Task<int32> readTask;
     Task<int32> writeTask;
+    boolean readerDone;
 
     public WsConn(int32 slot, #TcpStream sock) {
         this.slot = slot;
@@ -87,6 +88,7 @@ public final class WsConn {
         this.outQueued = 0;
         this.outStop = false;
         this.outStopped = false;
+        this.readerDone = false;
         return;
     }
 
@@ -167,6 +169,7 @@ public final class WsConn {
         } catch (Exception e) {
             c.dead = true;
             h.connGone(c.slot);
+            c.readerDone = true;
             return 0;
         }
         Task<int32> wt = spawn writeLoop(c);
@@ -176,6 +179,12 @@ public final class WsConn {
             try {
                 m #= c.ws.receive();
             } catch (Exception e) {
+                // A dead peer is normal lifecycle, but it must never be
+                // SILENT — the 2026-08-31 wedge hid behind exactly this
+                // catch. stderr is the fault channel; a torn transport
+                // is a fault-shaped fact.
+                System.stderr.println("cabra: conn " + c.slot
+                    + " receive ended: " + e.getMessage());
                 break;
             }
             if (m == null) {
@@ -194,11 +203,33 @@ public final class WsConn {
         }
         c.dead = true;
         h.connGone(c.slot);
+        c.readerDone = true;
         return 0;
     }
 
     public String inLineAt(int32 s) {
         return this.inSlots.get(s);
+    }
+
+    /** Force teardown: close the socket so a parked receive fails
+     *  fast, then wait for the READER fiber to exit — a dropped conn
+     *  with a live reader is a use-after-free (the suite's garbage
+     *  slot-id log, 2026-08-31). */
+    public void stopAll() {
+        this.dead = true;
+        if (this.sock != null) {
+            try {
+                this.sock.close();
+            } catch (Exception e) {
+            }
+        }
+        int32 spins = 0;
+        while (!this.readerDone && spins < 3000) {
+            Tasks.sleepMillis(1L);
+            spins = spins + 1;
+        }
+        this.stopWriter();
+        return;
     }
 
     /** Stop the writer fiber and wait for it. */

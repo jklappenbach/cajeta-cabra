@@ -241,6 +241,8 @@ public final class Serve implements TokenSink {
                 "submit failed: " + t.getMessage());
             return;
         }
+        this.ensureChunker();
+        this.chunker.reset(slot);
         this.trRid[slot] = rid;
         this.trId[slot] = r.id;
         this.trPromptLen[slot] = n;
@@ -410,6 +412,14 @@ public final class Serve implements TokenSink {
     }
 
     void emitDoneFor(int32 slot, Request q) {
+        this.ensureChunker();
+        if (this.chunker.hasTail(slot)) {
+            String tailS #= this.chunker.take(slot,
+                Host.emptyBytes(), true);
+            if (tailS.byteLength() > 0) {
+                Protocol.emitChunk(this.out, this.trId[slot], tailS);
+            }
+        }
         String finish = "budget";
         if (q.finishReason() == Request.FINISH_EOS) {
             finish = "eos";
@@ -488,8 +498,23 @@ public final class Serve implements TokenSink {
         int32[] one #= heap int32[1];
         one[0] = token;
         int8[] b #= this.engine.tokenizer().decode(one, 1);
-        String s = heap String(#b, (int32) b.count());
-        Protocol.emitChunk(this.out, this.trId[slot], s);
+        // Same hold-back as the ws host (Utf8Chunker): the TRANSCRIPT
+        // must not depend on which transport carried it, and a token
+        // boundary is allowed to split a multi-byte sequence.
+        this.ensureChunker();
+        String s #= this.chunker.take(slot, b, false);
+        if (s.byteLength() > 0) {
+            Protocol.emitChunk(this.out, this.trId[slot], s);
+        }
+        return;
+    }
+
+    Utf8Chunker chunker;
+
+    void ensureChunker() {
+        if (this.chunker == null) {
+            this.chunker = heap Utf8Chunker(this.cap);
+        }
         return;
     }
 }

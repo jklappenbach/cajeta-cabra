@@ -1,0 +1,140 @@
+package dev.cajeta.cabra;
+
+import cajeta.lang.String;
+
+/**
+ * UTF-8 hold-back for streamed chunks, shared by every transport
+ * (spec §5.4.2's "same op set, same semantics" extends to CONTENT:
+ * a transcript must not depend on which wire carried it).
+ *
+ * A token boundary can split a multi-byte sequence, and RFC 6455 makes
+ * invalid UTF-8 in a ws TEXT frame a protocol violation — the peer
+ * answers CLOSE(1007) and the conversation dies (the 2026-08-31
+ * two-client wedge). stdio tolerated raw bytes, but tolerating them on
+ * one transport and not the other made the same request produce two
+ * different transcripts, which is worse than either behaviour.
+ *
+ * Policy: emit only COMPLETE sequences; hold the (≤3-byte) plausible
+ * tail for the next token; a byte that can never start a sequence
+ * becomes U+FFFD immediately (garbage must not deadlock the stream);
+ * flush at finish replaces any held tail with U+FFFD.
+ *
+ * One instance per in-flight request SLOT: the per-slot tails live
+ * here so both Serve and Host carry one chunker sized to their table.
+ */
+public final class Utf8Chunker {
+
+    int32 cap;
+    int8[] pendBuf;     // cap slots x 4 bytes
+    int32[] pendLen;
+
+    public Utf8Chunker(int32 cap) {
+        this.cap = cap;
+        this.pendBuf #= heap int8[(int64) cap * 4L];
+        this.pendLen = heap int32[cap];
+        return;
+    }
+
+    /** Reset a slot's tail (a new request reuses the slot). */
+    public void reset(int32 slot) {
+        this.pendLen[slot] = 0;
+        return;
+    }
+
+    public boolean hasTail(int32 slot) {
+        return this.pendLen[slot] > 0;
+    }
+
+    /**
+     * Merge `slot`'s held tail with `raw`, and return the longest
+     * emit-safe prefix as an OWNED string (empty when everything is
+     * held back). `flush` forbids holding — a finished request's tail
+     * becomes U+FFFD.
+     */
+    public #String take(int32 slot, int8[] raw, boolean flush) {
+        int32 pn = this.pendLen[slot];
+        int32 total = pn + (int32) raw.count();
+        int8[] b #= heap int8[total > 0 ? total : 1];
+        int32 k = 0;
+        while (k < pn) {
+            b[k] = this.pendBuf[(int64) slot * 4L + (int64) k];
+            k = k + 1;
+        }
+        k = 0;
+        while (k < (int32) raw.count()) {
+            b[pn + k] = raw[k];
+            k = k + 1;
+        }
+        this.pendLen[slot] = 0;
+
+        int8[] outb #= heap int8[(int64) (total > 0 ? total : 1) * 3L];
+        int32 on = 0;
+        int32 pos = 0;
+        while (pos < total) {
+            int32 c = (int32) b[pos];
+            if (c < 0) { c = c + 256; }
+            int32 need = 0;
+            if (c < 128) { need = 1; }
+            else if (c >= 194 && c < 224) { need = 2; }
+            else if (c >= 224 && c < 240) { need = 3; }
+            else if (c >= 240 && c < 245) { need = 4; }
+            if (need == 0) {
+                outb[on] = (int8) (0 - 17);
+                outb[on + 1] = (int8) (0 - 65);
+                outb[on + 2] = (int8) (0 - 67);
+                on = on + 3;
+                pos = pos + 1;
+                continue;
+            }
+            if (pos + need > total) {
+                if (!flush) {
+                    int32 t = 0;
+                    while (pos + t < total) {
+                        this.pendBuf[(int64) slot * 4L + (int64) t] =
+                            b[pos + t];
+                        t = t + 1;
+                    }
+                    this.pendLen[slot] = total - pos;
+                    break;
+                }
+                outb[on] = (int8) (0 - 17);
+                outb[on + 1] = (int8) (0 - 65);
+                outb[on + 2] = (int8) (0 - 67);
+                on = on + 3;
+                pos = pos + 1;
+                continue;
+            }
+            boolean okTrail = true;
+            int32 q = 1;
+            while (q < need) {
+                int32 cc = (int32) b[pos + q];
+                if (cc < 0) { cc = cc + 256; }
+                if (cc < 128 || cc >= 192) { okTrail = false; }
+                q = q + 1;
+            }
+            if (!okTrail) {
+                outb[on] = (int8) (0 - 17);
+                outb[on + 1] = (int8) (0 - 65);
+                outb[on + 2] = (int8) (0 - 67);
+                on = on + 3;
+                pos = pos + 1;
+                continue;
+            }
+            int32 g = 0;
+            while (g < need) {
+                outb[on] = b[pos + g];
+                on = on + 1;
+                g = g + 1;
+            }
+            pos = pos + need;
+        }
+        int8[] outExact #= heap int8[on > 0 ? on : 1];
+        int32 x = 0;
+        while (x < on) {
+            outExact[x] = outb[x];
+            x = x + 1;
+        }
+        String s = heap String(#outExact, on);
+        return #= s;
+    }
+}

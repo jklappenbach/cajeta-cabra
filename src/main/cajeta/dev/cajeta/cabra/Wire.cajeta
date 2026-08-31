@@ -35,7 +35,13 @@ public final class Wire {
                 else if (c == 10) { out = out + "\\n"; }
                 else if (c == 13) { out = out + "\\r"; }
                 else if (c == 9) { out = out + "\\t"; }
-                else { out = out + "\\u0000"; }   // rare controls: NUL form
+                else {
+                    // Real \u00XX for the control byte - the earlier
+                    // placeholder rewrote EOT/SO/etc to NUL and broke
+                    // transport-equality by one byte (2026-08-31).
+                    out = out + "\\u00" + Wire.hexDigit(c / 16)
+                        + Wire.hexDigit(c % 16);
+                }
                 start = i + 1;
             }
             i = i + 1;
@@ -48,6 +54,25 @@ public final class Wire {
             out = out + tail;
         }
         return #= Wire.cp(out);
+    }
+
+    static String hexDigit(int32 v) {
+        if (v == 0) { return "0"; }
+        if (v == 1) { return "1"; }
+        if (v == 2) { return "2"; }
+        if (v == 3) { return "3"; }
+        if (v == 4) { return "4"; }
+        if (v == 5) { return "5"; }
+        if (v == 6) { return "6"; }
+        if (v == 7) { return "7"; }
+        if (v == 8) { return "8"; }
+        if (v == 9) { return "9"; }
+        if (v == 10) { return "a"; }
+        if (v == 11) { return "b"; }
+        if (v == 12) { return "c"; }
+        if (v == 13) { return "d"; }
+        if (v == 14) { return "e"; }
+        return "f";
     }
 
     static #String cp(String s) {

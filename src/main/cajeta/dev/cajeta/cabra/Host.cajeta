@@ -111,8 +111,19 @@ public final class Host implements TokenSink {
                 s.close();
                 continue;
             }
-            WsConn c = heap WsConn(slot, #s);
-            h.conns[slot] #= c;
+            if (h.conns[slot] != null) {
+                // Reusing a dead conn's slot: JOIN its fibers first —
+                // replacing the object under a still-parked reader was
+                // a use-after-free (the garbage slot-id logs,
+                // 2026-08-31).
+                h.conns[slot].stopAll();
+            }
+            // Fresh allocation STRAIGHT into the slot: a fiber-local
+            // intermediary left the slot holding a borrow whose parked
+            // owner died across this fiber's own park/resume — carrier
+            // threads then closed live connections (strace-proven,
+            // 2026-08-31).
+            h.conns[slot] #= heap WsConn(slot, #s);
             WsConn.startRead(h.conns[slot], h);
         }
         return 0;
@@ -121,7 +132,8 @@ public final class Host implements TokenSink {
     int32 freeConnSlot() {
         int32 i = 0;
         while (i < this.maxConns) {
-            if (this.conns[i] == null || this.conns[i].dead) {
+            if (this.conns[i] == null
+                    || (this.conns[i].dead && this.conns[i].readerDone)) {
                 return i;
             }
             i = i + 1;
@@ -289,6 +301,8 @@ public final class Host implements TokenSink {
             this.say(connSlot, m);
             return;
         }
+        this.ensureChunker();
+        this.chunker.reset(slot);
         this.trRid[slot] = rid;
         this.trId[slot] = r.id;
         this.trConn[slot] = connSlot;
@@ -296,6 +310,14 @@ public final class Host implements TokenSink {
         this.trOpen[slot] = true;
         this.live = this.live + 1;
         return;
+    }
+
+    static int8[] emptyZ;
+    static int8[] emptyBytes() {
+        if (Host.emptyZ == null) {
+            Host.emptyZ #= heap int8[1];
+        }
+        return Host.emptyZ;
     }
 
     int32 freeReqSlot() {
@@ -340,6 +362,15 @@ public final class Host implements TokenSink {
             if (this.trOpen[i]) {
                 Request q = this.engine.request(this.trRid[i]);
                 if (q.finishReason() != Request.FINISH_NONE) {
+                    this.ensureChunker();
+                    if (this.chunker.hasTail(i)) {
+                        String tailS #= this.chunker.take(i,
+                            Host.emptyBytes(), true);
+                        if (tailS.byteLength() > 0) {
+                            String tm #= Wire.chunk(this.trId[i], tailS);
+                            this.say(this.trConn[i], tm);
+                        }
+                    }
                     String finish = "budget";
                     if (q.finishReason() == Request.FINISH_EOS) {
                         finish = "eos";
@@ -373,7 +404,19 @@ public final class Host implements TokenSink {
         return;
     }
 
-    /** TokenSink: rid -> (wireId, conn); decode one token, enqueue. */
+    // UTF-8 hold-back — shared with the stdio path via Utf8Chunker
+    // (same request, same transcript, whichever wire carried it).
+    Utf8Chunker chunker;
+
+    void ensureChunker() {
+        if (this.chunker == null) {
+            this.chunker = heap Utf8Chunker(this.cap);
+        }
+        return;
+    }
+
+    /** TokenSink: rid -> (wireId, conn); decode one token, hold back
+     *  any incomplete UTF-8 tail, enqueue the complete part. */
     public void onToken(int32 reqId, int32 tok) {
         if (this.engine.isEog(tok)) {
             return;
@@ -381,12 +424,15 @@ public final class Host implements TokenSink {
         int32 i = 0;
         while (i < this.cap) {
             if (this.trOpen[i] && this.trRid[i] == reqId) {
+                this.ensureChunker();
                 int32[] one #= heap int32[1];
                 one[0] = tok;
-                int8[] b #= this.engine.tokenizer().decode(one, 1);
-                String s = heap String(#b, (int32) b.count());
-                String m #= Wire.chunk(this.trId[i], s);
-                this.say(this.trConn[i], m);
+                int8[] raw #= this.engine.tokenizer().decode(one, 1);
+                String s #= this.chunker.take(i, raw, false);
+                if (s.byteLength() > 0) {
+                    String m #= Wire.chunk(this.trId[i], s);
+                    this.say(this.trConn[i], m);
+                }
                 return;
             }
             i = i + 1;
@@ -404,8 +450,7 @@ public final class Host implements TokenSink {
         while (i < this.maxConns) {
             WsConn c = this.conns[i];
             if (c != null) {
-                c.dead = true;
-                c.stopWriter();
+                c.stopAll();
             }
             i = i + 1;
         }
