@@ -12,3 +12,4 @@ build/
 *.obj
 *.cja
 src/main/cajeta/*.c
+app.jsonl

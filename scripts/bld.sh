@@ -23,6 +23,8 @@ codec_ver="$(sed -n 's/.*"dev\.cajeta\.codec"[[:space:]]*:[[:space:]]*"\([^"]*\)
 jinja_ver="$(sed -n 's/.*"dev\.cajeta\.jinja"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$here/../cajeta-llm/cajeta.json" | head -1)"
 CODEC="${CODEC:-$here/../cajeta-codec/build/archive/dev.cajeta.codec-$codec_ver.cja}"
 JINJA="${JINJA:-$here/../cajeta-jinja/build/archive/dev.cajeta.jinja-$jinja_ver.cja}"
+logging_ver="$(sed -n 's/.*"dev\.cajeta\.logging"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$here/cajeta.json" | head -1)"
+LOGGING="${LOGGING:-$here/../cajeta-logging/build/archive/dev.cajeta.logging-$logging_ver.cja}"
 LLM_SRC="${LLM_SRC:-$here/../cajeta-llm/src/main/cajeta}"
 
 mkdir -p "$here/tmp"
@@ -40,10 +42,10 @@ LOG="$here/tmp/bld-$(basename "$OUT").log"
 # fixed in the compiler as of cajeta c963d19b — it is now a hard error
 # naming --classpath.
 "$CAJETA" --emit=cja -o "$here/tmp/llm-$BE.cja" \
-    --classpath="$CODEC,$JINJA" \
+    --classpath="$CODEC,$JINJA,$LOGGING" \
     dev.cajeta.llm.Llm.run "$LLM_SRC" "$here/tmp" > "$LOG" 2>&1
 "$CAJETA" --emit=exe --release --xpu-backend="$BE" \
-    --classpath="$here/tmp/llm-$BE.cja,$CODEC,$JINJA" \
+    --classpath="$here/tmp/llm-$BE.cja,$CODEC,$JINJA,$LOGGING" \
     -o "$OUT" dev.cajeta.cabra.Main.main \
     "$here/src/main/cajeta" "$here/tmp" >> "$LOG" 2>&1
 rc=$?

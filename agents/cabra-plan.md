@@ -274,8 +274,17 @@ both route through it.
 - [x] 4.2.2 Per-request sink demux by scheduler request id → caller id.
 
 ### 4.3 Acceptance
-- [~] 4.3.1 An N-client driver script completes with per-id outputs
+- [x] 4.3.1 An N-client driver script completes with per-id outputs
       equal to serial runs. Blocked on 4.2.1: from a pipe, lines cannot
+      **CLOSED 2026-08-31**: exact per-id parity against solo runs is
+      ServeLoopTest.readerFedRequestsOverlapAndKeepTheirContent (toy,
+      in-suite); the real-model arm ran the 8B Q4_K_M on vulkan with a
+      scripted 2-client session — chunks for ids 1 and 2 INTERLEAVE in
+      the transcript (the chat admitted mid-decode of the generate),
+      finishes eos/budget, and 19 session-attributed records landed in
+      app.jsonl via --verbose. bld.sh gained the logging classpath it
+      was missing since 2026-08-30.
+
       arrive during a drive, so N clients cannot actually overlap yet.
       The equality it would assert is already pinned in-process by
       4.1.1 (`interleavedRequestsKeepTheirOwnContent`).
