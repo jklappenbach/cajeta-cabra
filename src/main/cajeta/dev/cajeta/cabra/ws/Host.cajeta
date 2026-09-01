@@ -68,6 +68,15 @@ public final class Host implements TokenSink {
     boolean[] trOpen;
     int32 idleSteps;
 
+    // 7.2.4: past in-flight capacity a request QUEUES (bounded FIFO of
+    // owned line copies); past the bound it is shed with an explicit
+    // busy error. Admission happens as reaping frees slots.
+    int32 queueBound;
+    ArrayList<String> qLine;
+    int32[] qConn;
+    int32 qHead;
+    int32 qCount;
+
     public Host(#LlmEngine engine, String token, int32 maxConns,
             int32 maxSessions, int64 idleExpiryMs) {
         this.engine #= engine;
@@ -88,6 +97,11 @@ public final class Host implements TokenSink {
         this.trPromptLen = heap int32[this.cap];
         this.trOpen = heap boolean[this.cap];
         this.idleSteps = 0;
+        this.queueBound = 8;
+        this.qLine = null;
+        this.qConn = null;
+        this.qHead = 0;
+        this.qCount = 0;
         this.engine.setSink(this);
         return;
     }
@@ -280,17 +294,22 @@ public final class Host implements TokenSink {
                 return;
             }
         }
-        this.submitOne(connSlot, r);
+        this.submitOne(connSlot, r, line);
         return;
     }
 
-    void submitOne(int32 connSlot, Req r) {
+    void submitOne(int32 connSlot, Req r, String line) {
         int32[] ids #= this.engine.tokenizer().encodePrompt(r.prompt);
         int32 n = (int32) ids.count();
         int32 slot = this.freeReqSlot();
         if (slot < 0) {
+            // 7.1.5: capacity means WAIT, not refuse — until the wait
+            // itself would be unbounded.
+            if (this.enqueueWaiting(connSlot, line)) {
+                return;
+            }
             String m #= Wire.error(r.id, r.hasId, ErrKind.CAPACITY,
-                "server busy: " + this.live + " requests in flight",
+                "busy: " + this.live + " in flight and the queue is full",
                 false);
             this.say(connSlot, m);
             return;
@@ -330,6 +349,76 @@ public final class Host implements TokenSink {
         return 0 - 1;
     }
 
+    /** Set BEFORE serving: how many requests may wait behind the
+     *  in-flight table before new ones are shed (7.1.5). */
+    public void setQueueBound(int32 b) {
+        this.queueBound = b;
+        return;
+    }
+
+    void ensureQueue() {
+        if (this.qLine != null) {
+            return;
+        }
+        this.qLine = heap ArrayList<String>();
+        int32 i = 0;
+        while (i < this.queueBound) {
+            String e #= WsConn.cp("");
+            this.qLine.add(#e);
+            i = i + 1;
+        }
+        this.qConn = heap int32[this.queueBound];
+        return;
+    }
+
+    boolean enqueueWaiting(int32 connSlot, String line) {
+        this.ensureQueue();
+        if (this.qCount >= this.queueBound) {
+            return false;
+        }
+        int32 t = (this.qHead + this.qCount) % this.queueBound;
+        String c #= WsConn.cp(line);
+        this.qLine.set(t, #c);
+        this.qConn[t] = connSlot;
+        this.qCount = this.qCount + 1;
+        return true;
+    }
+
+    /** Admit queued requests into slots reaping just freed. A queued
+     *  line re-parses and re-touches its session: time passed while it
+     *  waited, and expiry must not be blind to that. */
+    void drainQueue() {
+        while (this.qCount > 0 && this.freeReqSlot() >= 0) {
+            String qline #= WsConn.cp(this.qLine.get(this.qHead));
+            int32 qcs = this.qConn[this.qHead];
+            this.qHead = (this.qHead + 1) % this.queueBound;
+            this.qCount = this.qCount - 1;
+            WsConn c = this.conns[qcs];
+            if (c == null || c.dead) {
+                continue;
+            }
+            int64 nowMs = Clock.nanoTime() / 1000000L;
+            this.reg.expire(nowMs);
+            Req qr #= Protocol.parseLine(qline);
+            if (!qr.ok) {
+                continue;
+            }
+            if (qr.hasSession) {
+                int32 st = this.reg.touch(qr.session, nowMs);
+                if (st != SessionRegistry.OPEN) {
+                    String m #= Wire.error(qr.id, qr.hasId,
+                        ErrKind.SESSION_GONE,
+                        "session expired while the request was queued",
+                        true);
+                    this.say(qcs, m);
+                    continue;
+                }
+            }
+            this.submitOne(qcs, qr, qline);
+        }
+        return;
+    }
+
     void driveStep() {
         if (this.live == 0) {
             this.idleSteps = 0;
@@ -344,6 +433,7 @@ public final class Host implements TokenSink {
         int32 done = this.reapFinished();
         if (done > 0) {
             this.idleSteps = 0;
+            this.drainQueue();
         } else {
             this.idleSteps = this.idleSteps + 1;
             if (this.idleSteps > 4096) {
@@ -398,6 +488,17 @@ public final class Host implements TokenSink {
                 this.trOpen[i] = false;
             }
             i = i + 1;
+        }
+        // Nothing queued behind a failed engine gets to start.
+        while (this.qCount > 0) {
+            String qline #= WsConn.cp(this.qLine.get(this.qHead));
+            int32 qcs = this.qConn[this.qHead];
+            this.qHead = (this.qHead + 1) % this.queueBound;
+            this.qCount = this.qCount - 1;
+            Req qr #= Protocol.parseLine(qline);
+            String qm #= Wire.error(qr.id, qr.hasId, ErrKind.INTERNAL,
+                "engine failed before this request started", false);
+            this.say(qcs, qm);
         }
         this.live = 0;
         return;

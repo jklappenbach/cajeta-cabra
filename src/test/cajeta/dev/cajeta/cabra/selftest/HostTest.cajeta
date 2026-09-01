@@ -16,8 +16,11 @@ import dev.cajeta.unit.Test;
 import dev.cajeta.http.ws.WebSocket;
 import dev.cajeta.http.ws.WsMessage;
 import dev.cajeta.http.ws.WsUpgrade;
+import cajeta.io.net.TcpListener;
 import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.cabra.proto.ErrKind;
 import dev.cajeta.cabra.ws.Host;
+import dev.cajeta.cabra.ws.WsConn;
 
 /**
  * Plan 7.1 — host mode over WebSocket, in-process on loopback: the
@@ -53,6 +56,25 @@ public class HostTest {
             this.closedEarly = false;
             this.sendShutdown = false;
             this.waitFor = null;
+        }
+    }
+
+    /** Evidence for the 7.1.5 triple: id 11 runs, id 12 queues then
+     *  runs, id 13 is shed past the queue bound. */
+    static class QueueRun {
+        public int32 port;
+        public int64 session;
+        public String acc12;
+        public String finish11;
+        public String finish12;
+        public String errKind13;
+        public QueueRun() {
+            this.port = 0;
+            this.session = 0L - 1L;
+            this.acc12 = "";
+            this.finish11 = "";
+            this.finish12 = "";
+            this.errKind13 = "";
         }
     }
 
@@ -235,5 +257,282 @@ public class HostTest {
         }
         Assert.isTrue(cu.closedEarly);
         Assert.isTrue(cw.sawAuthed);
+    }
+
+    /** 7.1.3 — auths, opens, records its session, then VANISHES: the
+     *  socket closes with no close op, as a crashed client would. */
+    static async int32 runVanisher(ClientRun cr) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(cr.port, rd, wr);
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        cr.sawAuthed = au != null && au.contains("authed");
+        ws.send("{\"op\":\"open\",\"id\":31}");
+        String op #= HostTest.recvText(ws);
+        JsonValue ov #= Json.parse(op);
+        cr.session = ov.object().get("session").asInt64();
+        sock.close();
+        return 0;
+    }
+
+    /** Waits past the idle expiry, then opens against the size-1
+     *  registry the vanished client filled: success is only possible
+     *  through reclaim (7.1.3). */
+    static async int32 runReclaimer(ClientRun cr, ClientRun dead) {
+        int32 tries = 0;
+        while (dead.session < 0L && tries < 1000) {
+            Tasks.sleepMillis(5L);
+            tries = tries + 1;
+        }
+        Tasks.sleepMillis(600L);
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(cr.port, rd, wr);
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        cr.sawAuthed = au != null && au.contains("authed");
+        ws.send("{\"op\":\"open\",\"id\":32}");
+        String op #= HostTest.recvText(ws);
+        if (op != null && op.contains("\"session\"")) {
+            JsonValue ov #= Json.parse(op);
+            cr.session = ov.object().get("session").asInt64();
+        }
+        ws.send("{\"op\":\"shutdown\"}");
+        Tasks.sleepMillis(200L);
+        sock.close();
+        return 0;
+    }
+
+    /** 7.1.6 — opens a turn, then STOPS READING: its whole stream sits
+     *  unread while the watched watched client's turn must still finish. */
+    static async int32 runMute(ClientRun cr, ClientRun watched) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(cr.port, rd, wr);
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        cr.sawAuthed = au != null && au.contains("authed");
+        ws.send("{\"op\":\"open\",\"id\":" + cr.wireId + "}");
+        String op #= HostTest.recvText(ws);
+        JsonValue ov #= Json.parse(op);
+        cr.session = ov.object().get("session").asInt64();
+        ws.send("{\"op\":\"generate\",\"id\":" + cr.wireId
+            + ",\"session\":" + cr.session + ",\"prompt\":\""
+            + ConcurrencyTest.PROMPT_A + "\",\"n\":16,\"temp\":0}");
+        int32 tries = 0;
+        while (watched.finish.byteLength() == 0 && tries < 2000) {
+            Tasks.sleepMillis(5L);
+            tries = tries + 1;
+        }
+        sock.close();
+        return 0;
+    }
+
+    /** 7.1.5 — one connection, three back-to-back generates against a
+     *  single in-flight slot with queue bound 1. */
+    static async int32 runQueueTriple(QueueRun qr) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, qr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(qr.port, rd, wr);
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        if (au == null) {
+            sock.close();
+            return 0;
+        }
+        ws.send("{\"op\":\"open\",\"id\":10}");
+        String op #= HostTest.recvText(ws);
+        JsonValue ov #= Json.parse(op);
+        qr.session = ov.object().get("session").asInt64();
+        // Back to back, no reads in between: 11 must occupy the slot
+        // long enough (n=64) for 12 and 13 to arrive behind it.
+        ws.send("{\"op\":\"generate\",\"id\":11,\"session\":" + qr.session
+            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
+            + "\",\"n\":64,\"temp\":0}");
+        ws.send("{\"op\":\"generate\",\"id\":12,\"session\":" + qr.session
+            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_B
+            + "\",\"n\":6,\"temp\":0}");
+        ws.send("{\"op\":\"generate\",\"id\":13,\"session\":" + qr.session
+            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
+            + "\",\"n\":6,\"temp\":0}");
+        while (true) {
+            String line #= HostTest.recvText(ws);
+            if (line == null) {
+                break;
+            }
+            JsonValue v #= Json.parse(line);
+            JsonObject o = v.object();
+            int64 id = 0L - 1L;
+            if (o.containsKey("id")) {
+                id = o.get("id").asInt64();
+            }
+            if (o.containsKey("error")) {
+                if (id == 13L) {
+                    String k #= o.get("kind").asString();
+                    qr.errKind13 = k;
+                }
+                if (id == 12L) {
+                    // A refusal of 12 is a queue that is NOT there —
+                    // terminal evidence, never something to wait past.
+                    qr.finish12 = "refused";
+                }
+            } else if (o.containsKey("chunk")) {
+                if (id == 12L) {
+                    String t #= o.get("chunk").asString();
+                    qr.acc12 = qr.acc12 + t;
+                }
+            } else if (o.containsKey("done")) {
+                String f #= o.get("finish").asString();
+                if (id == 11L) {
+                    qr.finish11 = f;
+                }
+                if (id == 12L) {
+                    qr.finish12 = f;
+                }
+            }
+            if (qr.finish11.byteLength() > 0
+                    && qr.finish12.byteLength() > 0
+                    && qr.errKind13.byteLength() > 0) {
+                break;
+            }
+        }
+        ws.send("{\"op\":\"shutdown\"}");
+        Tasks.sleepMillis(200L);
+        sock.close();
+        return 0;
+    }
+
+    /** Holds a raw TCP connection open (no upgrade, no reads) until
+     *  the test flags it done — the far end of the outbox-bound test. */
+    static async int32 runHolder(ClientRun cr) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        int32 tries = 0;
+        while (!cr.closedEarly && tries < 2000) {
+            Tasks.sleepMillis(5L);
+            tries = tries + 1;
+        }
+        sock.close();
+        return 0;
+    }
+
+    /** 7.1.3 — a client that dies without closing has its session
+     *  reclaimed by expiry: one session slot, 250ms idle bound, and a
+     *  later open succeeds with a NEW sid. */
+    @Test
+    public void aDeadClientsSessionIsReclaimedByExpiry() {
+        LlmEngine e #= ConcurrencyTest.engine(1);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 1, 250L);
+        h.listen(0);
+        ClientRun cv = heap ClientRun();
+        cv.port = h.port;
+        ClientRun cr = heap ClientRun();
+        cr.port = h.port;
+        scope {
+            spawn runVanisher(cv);
+            spawn runReclaimer(cr, cv);
+            h.run();
+            h.shutdown();
+        }
+        Assert.isTrue(cv.session >= 0L);
+        Assert.isTrue(cr.session >= 0L);
+        // A fresh session, not the leaked one handed back.
+        Assert.isTrue(cv.session != cr.session);
+    }
+
+    /** 7.1.5 + 7.2.4 — beyond capacity a request queues and later runs
+     *  (id 12, byte-equal to its solo); beyond the queue bound it is
+     *  shed with an explicit busy error (id 13, kind=capacity). */
+    @Test
+    public void beyondCapacityQueuesThenRunsBeyondTheBoundSheds() {
+        String soloB #= ConcurrencyTest.serialRun("tmp/ht-q-b.jsonl",
+            12L, ConcurrencyTest.PROMPT_B);
+        LlmEngine e #= ConcurrencyTest.engine(1);
+        Host h = heap Host(#e, HostTest.TOKEN, 2, 1, 60000L);
+        h.setQueueBound(1);
+        h.listen(0);
+        QueueRun q = heap QueueRun();
+        q.port = h.port;
+        scope {
+            spawn runQueueTriple(q);
+            h.run();
+            h.shutdown();
+        }
+        Assert.isTrue(q.finish11.byteLength() > 0);
+        Assert.isTrue(q.acc12.equals(soloB));
+        Assert.isTrue(q.errKind13.equals(ErrKind.CAPACITY));
+    }
+
+    /** 7.1.6 — a client that stops reading does not stall other
+     *  sessions: F's turn completes byte-for-byte while S never reads
+     *  a frame of its own stream. */
+    @Test
+    public void aClientThatStopsReadingDoesNotStallOthers() {
+        String soloB #= ConcurrencyTest.serialRun("tmp/ht-mute-b.jsonl",
+            22L, ConcurrencyTest.PROMPT_B);
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 2, 60000L);
+        h.listen(0);
+        ClientRun cs = heap ClientRun();
+        cs.port = h.port;
+        cs.wireId = 21L;
+        ClientRun cf = heap ClientRun();
+        cf.port = h.port;
+        cf.wireId = 22L;
+        cf.prompt = ConcurrencyTest.PROMPT_B;
+        cf.sendShutdown = true;
+        scope {
+            spawn runMute(cs, cf);
+            spawn runClient(cf);
+            h.run();
+            h.shutdown();
+        }
+        Assert.isTrue(cs.sawAuthed);
+        Assert.isTrue(cf.acc.equals(soloB));
+        Assert.isTrue(cf.finish.byteLength() > 0);
+    }
+
+    /** §5.3.2 / 7.2.4 — the outbound ring REFUSES past its bound
+     *  instead of blocking: no writer fiber runs, nothing drains, and
+     *  enqueue number OUT_CAP+1 must come back false. */
+    @Test
+    public void theOutboxBoundRefusesInsteadOfBlocking() {
+        IpAddress la #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#la, 0);
+        TcpListener l = TcpListener.bind(addr);
+        ClientRun ch = heap ClientRun();
+        ch.port = l.boundPort();
+        scope {
+            spawn runHolder(ch);
+            TcpStream s #= l.acceptAsync();
+            WsConn c = heap WsConn(0, #s);
+            int32 i = 0;
+            boolean allIn = true;
+            while (i < 256) {
+                if (!c.enqueueOut("m" + i)) {
+                    allIn = false;
+                }
+                i = i + 1;
+            }
+            Assert.isTrue(allIn);
+            Assert.isFalse(c.enqueueOut("overflow"));
+            c.dead = true;
+            ch.closedEarly = true;
+        }
+        l.close();
     }
 }

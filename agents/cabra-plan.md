@@ -363,22 +363,19 @@ regression now.
 ## 7. Host mode over WebSocket
 
 *Satisfies spec §5.1.2, §5.3, §5.4.1, §5.5. Depends on unit 6.*
-**BLOCKED until `cajeta-llm-plan` 15.2.8 is fixed** — host mode is N
-concurrent sequences in one engine, and the engine crashes above one at
-the default chunk.
 
 ### 7.1 TDD
 - [x] 7.1.1 Two clients connected at once each get their own session and
       their own output.
 - [x] 7.1.2 Two clients share ONE model load — the measurement that
       justifies host mode at all (§5.1.4).
-- [ ] 7.1.3 A client that dies without closing has its session reclaimed
+- [x] 7.1.3 A client that dies without closing has its session reclaimed
       by expiry, not leaked.
 - [x] 7.1.4 A connection without a valid token is closed before any other
       op is processed.
-- [ ] 7.1.5 Beyond capacity, a request queues and later runs; beyond the
+- [x] 7.1.5 Beyond capacity, a request queues and later runs; beyond the
       queue bound it is shed with an explicit busy error.
-- [ ] 7.1.6 A client that stops reading does not stall other sessions.
+- [x] 7.1.6 A client that stops reading does not stall other sessions.
 
 ### 7.2 Coding
 - [x] 7.2.1 A WebSocket channel over `dev.cajeta.http` implementing the
@@ -394,32 +391,26 @@ The road there is a story: a real runtime reactor bug (multi-waiter
 clobber, fixed in cajeta 1bb96088), raw token bytes violating RFC 6455
 UTF-8 (CLOSE 1007), a Wire.esc placeholder rewriting controls to NUL,
 and two fiber-lifetime use-after-frees in teardown/slot-reuse (now
-joined via WsConn.stopAll). Still open: 7.1.3 (ws-level expiry-reclaim
-test), 7.1.5/7.2.4 (queue-then-run + shed policy beyond the outbox
-bound), 7.1.6 (slow-reader test — the bounded-outbox mechanism exists,
-the test does not), 7.3.1 (N-terminal manual acceptance).
+joined via WsConn.stopAll).
 
-- [ ] 7.2.4 Capacity, queue bound and shedding.
+**Unit 7 TDD closed 2026-08-31** (suite 44/0): 7.1.3 expiry reclaim
+proven over the wire (a vanished client's slot reopens with a NEW sid);
+7.1.5/7.2.4 landed as a bounded FIFO of owned line copies ahead of the
+in-flight table — drained as reaping frees slots, session re-touched at
+admit, refused with an explicit busy/capacity error past the bound, and
+flushed with errors if the engine fails first. The queue check was
+negative-probed: bound 0 fails the test (a refusal of a queued id is
+terminal evidence in the client loop, never something to wait past).
+7.1.6 = a mute client holds its unread stream while the other's turn
+finishes byte-equal to its solo, plus a direct proof the outbox ring
+REFUSES (not blocks) at OUT_CAP+1. Open: 7.3.1 only (manual).
+
+- [x] 7.2.4 Capacity, queue bound and shedding.
 
 
-**Unit 7 status 2026-08-31 — BLOCKED on a runtime lost-wake bug.**
-Landed: Host + WsConn (accept fiber, per-conn reader/writer fibers with
-bounded outbox + shed, auth gate, unit-6 sessions, Serve-style demux
-with a connection column). The SINGLE-client path is proven live end to
-end (tools/repro/HostProbe.cajeta, cpu + vulkan: connect, upgrade,
-auth, open, streamed generate, shutdown, exit 0). The TWO-client path
-wedges 100% deterministically in the RUNTIME, not in cabra: at wedge
-every thread is parked (main + 6 carriers futex_wait, reactor ep_poll)
-while fully FLUSHED ws frames sit unread on the client sockets — the
-reactor-woken fibers are never resumed by any carrier. A println in
-the dispatch path masks it (scheduling side effect); a forced 1 ms
-main park per step does NOT (so not starvation — a dropped wake).
-Repro: build tools/repro/HostProbe.cajeta against cabra.cja (any
-backend) and run; wedges after both generates dispatch. HostTest.cajeta
-carries the suite-side tests, currently wedging the suite — REMOVE it
-from the tree until the runtime fix, then restore. Compiler-side next:
-the EPOLLONESHOT wake -> carrier ready-deque handoff in
-cajeta_net_reactor.c / the carrier futex wake.
+*(A 2026-08-31 BLOCKED note stood here: the two-client path wedged in
+the runtime. That was the reactor multi-waiter bug, fixed in cajeta
+1bb96088 — the full story is in the core-green note above.)*
 
 ### 7.3 Acceptance
 - [ ] 7.3.1 N terminals against one host produce N conversations from one
