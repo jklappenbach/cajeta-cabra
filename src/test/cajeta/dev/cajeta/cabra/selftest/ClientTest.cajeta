@@ -1,0 +1,237 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.collection.ArrayList;
+import cajeta.concurrent.Tasks;
+import cajeta.io.file.File;
+import cajeta.io.file.FileReader;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpListener;
+import cajeta.io.net.TcpStream;
+import cajeta.lang.String;
+import cajeta.time.Clock;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.llm.EngineOptions;
+import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.cabra.client.Relay;
+import dev.cajeta.cabra.io.LineReader;
+import dev.cajeta.cabra.ws.Host;
+
+/**
+ * Plan 8.1 — client mode: cabra as a stdio front over a ws back. The
+ * relay reads the SAME id-tagged JSONL a parent would feed embedded
+ * serve, opens (or resumes) one session, and streams the host's
+ * replies back out — so 8.3.1's "identical embedded and connected" is
+ * a byte comparison, not a claim.
+ */
+public class ClientTest {
+
+    /** Long enough to span several KV blocks (toy block = 4 tokens),
+     *  so 8.1.2's adoption measurement has blocks to adopt. */
+    static final String PROMPT_LONG = "the quick brown fox jumps over "
+        + "the lazy dog and the quick brown fox jumps over the lazy "
+        + "dog once more before resting";
+
+    /** One relay run and its evidence. */
+    static class RelayRun {
+        public int32 port;
+        public String token;
+        public String inPath;
+        public String outPath;
+        public int64 session;       // -1 = open fresh
+        public int64 sessionOut;
+        public RelayRun sessionFrom; // resume with THIS run's session
+        public RelayRun waitFor;     // strict ordering between runs
+        public int32 rc;
+        public boolean done;
+        public RelayRun() {
+            this.port = 0;
+            this.token = "";
+            this.inPath = "";
+            this.outPath = "";
+            this.session = 0L - 1L;
+            this.sessionOut = 0L - 1L;
+            this.sessionFrom = null;
+            this.waitFor = null;
+            this.rc = 0 - 1;
+            this.done = false;
+        }
+    }
+
+    public ClientTest() { return; }
+
+    static #LlmEngine engineWithStore(int32 maxSeqs, String storePath) {
+        EngineOptions opts = heap EngineOptions(ConcurrencyTest.TOY);
+        opts.ctx = 256;
+        opts.maxSeqs = maxSeqs;
+        opts.kvStore = storePath;
+        return #LlmEngine.load(#opts);
+    }
+
+    static void writeAll(String path, String content) {
+        FileWriter w #= File.openWrite(path, OpenMode.WRITE);
+        int8[] b #= content.toBytes();
+        w.write(b, (int32) b.count());
+        w.close();
+        return;
+    }
+
+    static async int32 runRelay(RelayRun rr) {
+        int32 tries = 0;
+        while (rr.waitFor != null && !rr.waitFor.done && tries < 2000) {
+            Tasks.sleepMillis(5L);
+            tries = tries + 1;
+        }
+        int64 sid = rr.session;
+        if (rr.sessionFrom != null) {
+            sid = rr.sessionFrom.sessionOut;
+        }
+        FileWriter fw #= File.openWrite(rr.outPath, OpenMode.WRITE);
+        Relay rel = heap Relay(rr.port, rr.token, sid, #fw);
+        FileReader fin #= File.openRead(rr.inPath);
+        LineReader r = heap LineReader(#fin);
+        LineReader.start(r);
+        rr.rc = rel.run(r);
+        rr.sessionOut = rel.sessionId();
+        r.close();
+        rel.shut();
+        rr.done = true;
+        return 0;
+    }
+
+    /** Waits for the watched relay, then auths and stops the host so
+     *  the test's host loop can return. */
+    static async int32 runStopper(RelayRun watched, int32 port) {
+        int32 tries = 0;
+        while (!watched.done && tries < 2000) {
+            Tasks.sleepMillis(5L);
+            tries = tries + 1;
+        }
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(port, rd, wr);
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        if (au != null) {
+            ws.send("{\"op\":\"shutdown\"}");
+            Tasks.sleepMillis(200L);
+        }
+        sock.close();
+        return 0;
+    }
+
+    /** 8.1.1 + 8.3.1 — the relay drives one conversation and its
+     *  transcript is BYTE-EQUAL to the embedded solo of the same
+     *  request: same protocol in, same bytes out. */
+    @Test
+    public void clientTranscriptMatchesEmbeddedByteForByte() {
+        String soloB #= ConcurrencyTest.serialRun("tmp/ct-solo.jsonl",
+            5L, ConcurrencyTest.PROMPT_B);
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 2, 60000L);
+        h.listen(0);
+        String g #= ConcurrencyTest.genLine(5L, ConcurrencyTest.PROMPT_B);
+        ClientTest.writeAll("tmp/ct-in-1.jsonl", g + "\n");
+        RelayRun rr = heap RelayRun();
+        rr.port = h.port;
+        rr.token = HostTest.TOKEN;
+        rr.inPath = "tmp/ct-in-1.jsonl";
+        rr.outPath = "tmp/ct-out-1.jsonl";
+        scope {
+            spawn runRelay(rr);
+            spawn runStopper(rr, h.port);
+            h.run();
+            h.shutdown();
+        }
+        Assert.equals(0L, (int64) rr.rc);
+        Assert.isTrue(rr.sessionOut >= 0L);
+        ArrayList<String> lines #= ConcurrencyTest.linesOf(rr.outPath);
+        String out5 #= ConcurrencyTest.chunksFor(lines, 5L);
+        Assert.isTrue(out5.equals(soloB));
+        String fin5 #= ConcurrencyTest.finishFor(lines, 5L);
+        Assert.isTrue(fin5.byteLength() > 0);
+    }
+
+    /** 8.1.2 — a dropped connection resumes the SAME session by id and
+     *  the prefix cache is still warm: the second connection's turn
+     *  ADOPTS stored blocks (a re-prefill that does not happen),
+     *  measured at the scheduler, not inferred from a reconnect. */
+    @Test
+    public void aDroppedConnectionResumesTheSameSessionWarm() {
+        String store = "tmp/ct-store-" + Clock.nanoTime();
+        LlmEngine e #= ClientTest.engineWithStore(2, store);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 2, 60000L);
+        h.listen(0);
+
+        String g1 #= ConcurrencyTest.genLine(7L, ClientTest.PROMPT_LONG);
+        ClientTest.writeAll("tmp/ct-in-w1.jsonl", g1 + "\n");
+        String g2 #= ConcurrencyTest.genLine(8L,
+            ClientTest.PROMPT_LONG + " and what happened next");
+        ClientTest.writeAll("tmp/ct-in-w2.jsonl", g2 + "\n");
+
+        RelayRun r1 = heap RelayRun();
+        r1.port = h.port;
+        r1.token = HostTest.TOKEN;
+        r1.inPath = "tmp/ct-in-w1.jsonl";
+        r1.outPath = "tmp/ct-out-w1.jsonl";
+        RelayRun r2 = heap RelayRun();
+        r2.port = h.port;
+        r2.token = HostTest.TOKEN;
+        r2.inPath = "tmp/ct-in-w2.jsonl";
+        r2.outPath = "tmp/ct-out-w2.jsonl";
+        r2.waitFor = r1;        // connection 1 is gone before 2 dials
+        r2.sessionFrom = r1;    // resume by id, not by reopening
+        scope {
+            spawn runRelay(r1);
+            spawn runRelay(r2);
+            spawn runStopper(r2, h.port);
+            h.run();
+            h.shutdown();
+        }
+        Assert.equals(0L, (int64) r1.rc);
+        Assert.equals(0L, (int64) r2.rc);
+        Assert.isTrue(r1.sessionOut >= 0L);
+        Assert.isTrue(r2.sessionOut == r1.sessionOut);
+        ArrayList<String> lines #= ConcurrencyTest.linesOf(r2.outPath);
+        String out8 #= ConcurrencyTest.chunksFor(lines, 8L);
+        Assert.isTrue(out8.byteLength() > 0);
+        // THE measurement: turn 1 filled an empty store (adopts 0);
+        // only turn 2 can have adopted, and it must have.
+        Assert.isTrue(h.adoptedBlocks() > 0);
+    }
+
+    /** 8.1.3 — connecting to no host fails with a clear message and
+     *  does not silently start one: nonzero rc, nothing emitted. */
+    @Test
+    public void connectingToNoHostFailsClearly() {
+        // A port that WAS free a moment ago and has no listener now.
+        IpAddress la #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#la, 0);
+        TcpListener l = TcpListener.bind(addr);
+        int32 deadPort = l.boundPort();
+        l.close();
+
+        ClientTest.writeAll("tmp/ct-in-3.jsonl",
+            "{\"op\":\"generate\",\"id\":1,\"prompt\":\"x\",\"n\":2}\n");
+        RelayRun rr = heap RelayRun();
+        rr.port = deadPort;
+        rr.token = HostTest.TOKEN;
+        rr.inPath = "tmp/ct-in-3.jsonl";
+        rr.outPath = "tmp/ct-out-3.jsonl";
+        scope {
+            spawn runRelay(rr);
+        }
+        Assert.isTrue(rr.rc != 0);
+        ArrayList<String> lines #= ConcurrencyTest.linesOf(rr.outPath);
+        Assert.equals(0L, (int64) lines.count());
+    }
+}

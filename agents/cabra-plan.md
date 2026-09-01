@@ -422,20 +422,37 @@ the runtime. That was the reactor multi-waiter bug, fixed in cajeta
 *Satisfies spec §5.1.3. Depends on unit 7.*
 
 ### 8.1 TDD
-- [ ] 8.1.1 cabra connects to a host and drives one conversation.
-- [ ] 8.1.2 A dropped connection resumes the SAME session by id, and the
+- [x] 8.1.1 cabra connects to a host and drives one conversation.
+- [x] 8.1.2 A dropped connection resumes the SAME session by id, and the
       prefix cache is still warm — measured as a re-prefill that does not
       happen, not merely as a successful reconnect.
-- [ ] 8.1.3 Connecting to no host fails with a clear message and does not
+- [x] 8.1.3 Connecting to no host fails with a clear message and does not
       silently start one (spec: no implicit server start).
 
 ### 8.2 Coding
-- [ ] 8.2.1 Client-side channel and session handling.
-- [ ] 8.2.2 `--connect` on the existing verbs.
+- [x] 8.2.1 Client-side channel and session handling.
+- [x] 8.2.2 `--connect` on the existing verbs.
+- [x] 8.2.3 `cabra host` verb — the unit-7 listener wired to the CLI
+      (it had no entry point), with `--port/--token/--max-conns/
+      --idle-expiry/--kv-store`, the chat template, and the context
+      admission guard (chat parity: Host refused-not-misran is tested).
 
 ### 8.3 Acceptance
-- [ ] 8.3.1 The same conversation behaves identically embedded and
+- [x] 8.3.1 The same conversation behaves identically embedded and
       connected, apart from latency.
+
+**Unit 8 closed 2026-08-31** (suite 48/0 + a live two-process smoke:
+host verb, `--connect` turn, `--session` resume, no-host refusal).
+Client mode is a stdio front over a ws back — Relay speaks the same
+id-tagged JSONL as embedded serve, so 8.3.1 is a BYTE comparison in
+ClientTest, not a claim; the live-model feel pass rides unit 10. The
+warm-resume claim is measured, not inferred: with `--kv-store` on the
+host, the resumed connection's turn ADOPTS stored blocks
+(Host.adoptedBlocks() > 0 across the reconnect; the store starts
+empty, so only the resume can have adopted). Decisions: loopback only
+(§5.5.2); `shutdown` from a client closes its SESSION, never the
+shared host; a torn transport = clear stderr naming `--session` + rc 1,
+never a behind-the-back reconnect (§5.2.8 is the crash story).
 
 ## 9. Diagnostics as records
 

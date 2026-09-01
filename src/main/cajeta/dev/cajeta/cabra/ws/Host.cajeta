@@ -10,6 +10,7 @@ import cajeta.lang.Optional;
 import cajeta.lang.String;
 import cajeta.time.Clock;
 import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.llm.chat.ChatTemplate;
 import dev.cajeta.llm.gen.SampleParams;
 import dev.cajeta.llm.gen.TokenSink;
 import dev.cajeta.llm.sched.Request;
@@ -20,6 +21,7 @@ import dev.cajeta.cabra.proto.Protocol;
 import dev.cajeta.cabra.proto.Req;
 import dev.cajeta.cabra.proto.Wire;
 import dev.cajeta.cabra.stdio.Serve;
+import dev.cajeta.cabra.ChatOp;
 
 /**
  * Host mode (spec §5.1.2, plan unit 7): one loaded model, N WebSocket
@@ -71,6 +73,9 @@ public final class Host implements TokenSink {
     // 7.2.4: past in-flight capacity a request QUEUES (bounded FIFO of
     // owned line copies); past the bound it is shed with an explicit
     // busy error. Admission happens as reaping frees slots.
+    ChatTemplate tpl;          // owned; null when the model ships none
+    int32 ctxLimit;            // 0 = no admission guard
+
     int32 queueBound;
     ArrayList<String> qLine;
     int32[] qConn;
@@ -97,12 +102,29 @@ public final class Host implements TokenSink {
         this.trPromptLen = heap int32[this.cap];
         this.trOpen = heap boolean[this.cap];
         this.idleSteps = 0;
+        this.tpl = null;
+        this.ctxLimit = 0;
         this.queueBound = 8;
         this.qLine = null;
         this.qConn = null;
         this.qHead = 0;
         this.qCount = 0;
         this.engine.setSink(this);
+        return;
+    }
+
+    /** Install the model's chat template. Left unset (null) the `chat`
+     *  op refuses — cabra never guesses a template (plan 3.2.1). */
+    public void setTemplate(#ChatTemplate t) {
+        this.tpl #= t;
+        return;
+    }
+
+    /** Context window for the admission guard (Serve's 4.x lesson: an
+     *  unadmittable prompt must be an ANSWER, not a scheduler spin).
+     *  0 leaves the guard off. */
+    public void setContext(int32 c) {
+        this.ctxLimit = c;
         return;
     }
 
@@ -299,8 +321,32 @@ public final class Host implements TokenSink {
     }
 
     void submitOne(int32 connSlot, Req r, String line) {
-        int32[] ids #= this.engine.tokenizer().encodePrompt(r.prompt);
+        int32[] ids = null;
+        if (r.op.equals("chat")) {
+            String rendered #= ChatOp.render(this.tpl, r.messagesRaw);
+            if (rendered == null) {
+                String tm #= Wire.error(r.id, r.hasId,
+                    ErrKind.BAD_REQUEST,
+                    "this model ships no chat template - use "
+                    + "\"generate\" with a raw prompt", false);
+                this.say(connSlot, tm);
+                return;
+            }
+            // RAW encode: the render already carries BOS and the role
+            // headers, so encodePrompt would prepend a second BOS.
+            ids #= this.engine.tokenizer().encode(rendered);
+        } else {
+            ids #= this.engine.tokenizer().encodePrompt(r.prompt);
+        }
         int32 n = (int32) ids.count();
+        if (this.ctxLimit > 0 && n + r.n > this.ctxLimit) {
+            String cm #= Wire.error(r.id, r.hasId, ErrKind.BAD_REQUEST,
+                "prompt is " + n + " tokens and n is " + r.n
+                + ", which exceeds the " + this.ctxLimit
+                + "-token context", false);
+            this.say(connSlot, cm);
+            return;
+        }
         int32 slot = this.freeReqSlot();
         if (slot < 0) {
             // 7.1.5: capacity means WAIT, not refuse — until the wait
@@ -559,5 +605,11 @@ public final class Host implements TokenSink {
 
     public int32 openSessions() {
         return this.reg.openCount();
+    }
+
+    /** Prefix blocks adopted instead of recomputed — the observable
+     *  behind 8.1.2's warm-resume claim. */
+    public int32 adoptedBlocks() {
+        return this.engine.scheduler().adoptedBlocks();
     }
 }

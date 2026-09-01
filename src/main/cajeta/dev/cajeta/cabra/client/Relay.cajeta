@@ -1,0 +1,305 @@
+package dev.cajeta.cabra.client;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.io.file.FileWriter;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.lang.Optional;
+import cajeta.lang.String;
+import cajeta.lang.System;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WsMessage;
+import dev.cajeta.http.ws.WsUpgrade;
+import dev.cajeta.cabra.io.LineReader;
+import dev.cajeta.cabra.proto.Protocol;
+import dev.cajeta.cabra.proto.Req;
+import dev.cajeta.cabra.proto.Wire;
+
+/**
+ * Client mode (spec §5.1.3, plan unit 8): a stdio front over a ws
+ * back. The relay speaks the SAME id-tagged JSONL a parent would feed
+ * embedded serve — it opens (or resumes, `--session`) ONE session,
+ * injects it into generate/chat lines that name none, and streams the
+ * host's replies out verbatim, so a conversation is byte-identical
+ * embedded and connected (8.3.1).
+ *
+ * Failure policy is the spec's crash story (§5.2.8): the relay never
+ * reconnects behind the parent's back. A torn transport is a clear
+ * stderr line naming the session to resume with, and a nonzero exit —
+ * conversation STATE is client-side, so the parent resumes by
+ * restarting with `--session` and resubmitting. Loopback only, like
+ * the host (§5.5.2). `shutdown` from the parent ends THIS conversation
+ * (close session, exit 0) — the host is shared and is never taken down
+ * by a client.
+ */
+public final class Relay {
+
+    int32 port;
+    String token;
+    int64 session;
+    FileWriter out;          // owned
+    TcpStream sock;          // owned
+    AsyncReader rd;          // owned; borrowed by ws
+    AsyncWriter wr;          // owned; borrowed by ws
+    WebSocket ws;            // owned
+
+    public Relay(int32 port, String token, int64 session,
+            #FileWriter out) {
+        this.port = port;
+        this.token = token;
+        this.session = session;
+        this.out #= out;
+        this.sock = null;
+        this.rd = null;
+        this.wr = null;
+        this.ws = null;
+        return;
+    }
+
+    /** The session this relay is driving — print-worthy for a parent
+     *  that wants to resume after a crash. */
+    public int64 sessionId() {
+        return this.session;
+    }
+
+    boolean connect() {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, this.port);
+        try {
+            this.sock #= TcpStream.connectAsync(#addr);
+        } catch (Exception e) {
+            // 8.1.3: no host is a clear refusal, never an implicit
+            // server start.
+            System.stderr.println("cabra: cannot connect to 127.0.0.1:"
+                + this.port + " - is a host running? (start one with "
+                + "'cabra host'; cabra never starts one implicitly)");
+            return false;
+        }
+        try {
+            this.rd = heap AsyncReader(this.sock);
+            this.wr = heap AsyncWriter(this.sock);
+            Uri u #= Uri.builder().scheme("ws").host("127.0.0.1")
+                .port(this.port).path("/").build();
+            this.ws #= WsUpgrade.connectClient(this.rd, this.wr, u,
+                424242);
+        } catch (Exception e) {
+            System.stderr.println("cabra: ws upgrade failed: "
+                + e.getMessage());
+            return false;
+        }
+        if (this.token.byteLength() > 0) {
+            String et #= Wire.esc(this.token);
+            try {
+                this.ws.send("{\"op\":\"auth\",\"token\":\"" + et
+                    + "\"}");
+            } catch (Exception e) {
+                System.stderr.println("cabra: auth send failed: "
+                    + e.getMessage());
+                return false;
+            }
+            String rep #= this.recvLine();
+            if (rep == null || !rep.contains("authed")) {
+                System.stderr.println(
+                    "cabra: host refused the token");
+                return false;
+            }
+        }
+        return true;
+    }
+
+    boolean ensureSession() {
+        if (this.session >= 0L) {
+            return true;
+        }
+        try {
+            this.ws.send("{\"op\":\"open\",\"id\":0}");
+        } catch (Exception e) {
+            System.stderr.println("cabra: open send failed: "
+                + e.getMessage());
+            return false;
+        }
+        String rep #= this.recvLine();
+        if (rep == null || !rep.contains("\"session\"")) {
+            String detail = rep == null ? "connection closed" : rep;
+            System.stderr.println("cabra: open failed: " + detail);
+            return false;
+        }
+        JsonValue v #= Json.parse(rep);
+        this.session = v.object().get("session").asInt64();
+        System.stderr.println("cabra: session " + this.session
+            + " (resume later with --session " + this.session + ")");
+        return true;
+    }
+
+    /** Pump the parent's lines through the host until EOF or a
+     *  shutdown op. 0 = clean; nonzero = transport failure, resumable
+     *  with `--session`. */
+    public int32 run(LineReader r) {
+        if (!this.connect()) {
+            return 1;
+        }
+        if (!this.ensureSession()) {
+            return 1;
+        }
+        while (true) {
+            Optional<int32> got = r.ch.receive();
+            if (got.isEmpty()) {
+                break;
+            }
+            String line = r.lineAt(got.get());
+            if (line.byteLength() == 0) {
+                continue;
+            }
+            Req q #= Protocol.parseLine(line);
+            if (q.ok && q.op.equals("shutdown")) {
+                // The host is SHARED: shutdown ends this conversation,
+                // not the service.
+                this.closeSession();
+                break;
+            }
+            boolean streaming = q.ok
+                && (q.op.equals("generate") || q.op.equals("chat"));
+            String sendLine = line;
+            String injected = null;
+            if (streaming && !q.hasSession) {
+                injected #= this.withSession(line);
+                sendLine = injected;
+            }
+            try {
+                this.ws.send(sendLine);
+            } catch (Exception e) {
+                System.stderr.println("cabra: connection to host lost"
+                    + " - resume with --session " + this.session);
+                return 1;
+            }
+            if (streaming) {
+                while (true) {
+                    String rep #= this.recvLine();
+                    if (rep == null) {
+                        System.stderr.println("cabra: connection to "
+                            + "host lost mid-turn - resume with "
+                            + "--session " + this.session);
+                        return 1;
+                    }
+                    this.emit(rep);
+                    if (Relay.isTerminal(rep)) {
+                        break;
+                    }
+                }
+            } else {
+                String rep2 #= this.recvLine();
+                if (rep2 == null) {
+                    System.stderr.println("cabra: connection to host "
+                        + "lost - resume with --session "
+                        + this.session);
+                    return 1;
+                }
+                this.emit(rep2);
+            }
+        }
+        return 0;
+    }
+
+    /** A turn's last line: its done, or an error object. Anything the
+     *  host sends that does not parse ends the turn too — better a
+     *  short turn than a parked-forever relay. */
+    static boolean isTerminal(String rep) {
+        try {
+            JsonValue v #= Json.parse(rep);
+            JsonObject o = v.object();
+            return o.containsKey("done") || o.containsKey("error");
+        } catch (Exception e) {
+            return true;
+        }
+    }
+
+    void closeSession() {
+        if (this.session < 0L) {
+            return;
+        }
+        try {
+            this.ws.send("{\"op\":\"close\",\"id\":0,\"session\":"
+                + this.session + "}");
+            String ack #= this.recvLine();
+            if (ack == null) {
+                return;
+            }
+        } catch (Exception e) {
+        }
+        return;
+    }
+
+    #String recvLine() {
+        while (true) {
+            WsMessage m = null;
+            try {
+                m #= this.ws.receive();
+            } catch (Exception e) {
+                return null;
+            }
+            if (m == null) {
+                return null;
+            }
+            if (m.isText()) {
+                return #m.text();
+            }
+        }
+    }
+
+    void emit(String line) {
+        String withNl = line + "\n";
+        int8[] b #= withNl.toBytes();
+        this.out.write(b, (int32) b.count());
+        return;
+    }
+
+    /** `{...}` -> `{"session":N,...}` — textual injection keeps every
+     *  field the parent sent, parsed or not. */
+    #String withSession(String line) {
+        String head = "{\"session\":" + this.session + ",";
+        int8[] hb #= head.toBytes();
+        int8[] lb #= line.toBytes();
+        int32 hn = (int32) hb.count();
+        int32 ln = (int32) lb.count();
+        int8[] nb = heap int8[hn + ln - 1];
+        int32 i = 0;
+        while (i < hn) {
+            nb[i] = hb[i];
+            i = i + 1;
+        }
+        int32 j = 1;
+        while (j < ln) {
+            nb[hn + j - 1] = lb[j];
+            j = j + 1;
+        }
+        String s = heap String(#nb, hn + ln - 1);
+        return #s;
+    }
+
+    /** Close the transport (politely — a bare TCP close reads as a
+     *  torn transport on the host's side) and the output writer. */
+    public void shut() {
+        if (this.ws != null) {
+            try {
+                this.ws.close(1000, "bye");
+            } catch (Exception e) {
+            }
+        }
+        if (this.sock != null) {
+            try {
+                this.sock.close();
+            } catch (Exception e) {
+            }
+        }
+        if (this.out != null) {
+            this.out.close();
+        }
+        return;
+    }
+}

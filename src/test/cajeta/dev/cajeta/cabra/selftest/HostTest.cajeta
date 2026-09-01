@@ -259,6 +259,50 @@ public class HostTest {
         Assert.isTrue(cw.sawAuthed);
     }
 
+    /** Sends one chat op (the toy ships no template), records the
+     *  reply, then shuts the host down. */
+    static async int32 runChatProbe(ClientRun cr) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(cr.port, rd, wr);
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        cr.sawAuthed = au != null && au.contains("authed");
+        ws.send("{\"op\":\"chat\",\"id\":41,\"messages\":"
+            + "[{\"role\":\"user\",\"content\":\"hi\"}],\"n\":2}");
+        String rep #= HostTest.recvText(ws);
+        if (rep != null) {
+            cr.acc = rep;
+        }
+        ws.send("{\"op\":\"shutdown\"}");
+        Tasks.sleepMillis(200L);
+        sock.close();
+        return 0;
+    }
+
+    /** Host-mode chat parity with Serve: a chat op against a model
+     *  with no template is REFUSED with a template error — never run
+     *  as a bare generate of an empty prompt. */
+    @Test
+    public void chatWithoutATemplateIsRefusedNotMisrun() {
+        LlmEngine e #= ConcurrencyTest.engine(1);
+        Host h = heap Host(#e, HostTest.TOKEN, 2, 1, 60000L);
+        h.listen(0);
+        ClientRun cc = heap ClientRun();
+        cc.port = h.port;
+        scope {
+            spawn runChatProbe(cc);
+            h.run();
+            h.shutdown();
+        }
+        Assert.isTrue(cc.sawAuthed);
+        Assert.isTrue(cc.acc.contains("template"));
+        Assert.isTrue(cc.acc.contains("error"));
+    }
+
     /** 7.1.3 — auths, opens, records its session, then VANISHES: the
      *  socket closes with no close op, as a crashed client would. */
     static async int32 runVanisher(ClientRun cr) {
