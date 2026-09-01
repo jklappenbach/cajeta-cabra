@@ -227,6 +227,15 @@ public final class DiagnosticBridge implements DiagCallback {
             this.log.debug("prefill: " + nm + " projections rows=" + v0);
             return;
         }
+        if (cat.equals("expert-cache")) {
+            // moe-expert-cache spec 8.1 / 3.3.1: one MoE layer call's
+            // resident/T0 split — the record cabra renders the cache
+            // behavior from.
+            this.log.debug("expert-cache: " + nm + " layer=" + v0
+                + " hits=" + v1 + " t0=" + v2 + " admits=" + v3
+                + " admitB=" + v4 + " residentB=" + v5);
+            return;
+        }
         if (cat.equals("kv-ceiling")) {
             this.log.debug("device kv ceiling: " + (v0 / 1048576L)
                 + " MiB (" + v1 + " slots x " + v2 + " ctx)");
