@@ -236,6 +236,26 @@ public final class DiagnosticBridge implements DiagCallback {
                 + " admitB=" + v4 + " residentB=" + v5);
             return;
         }
+        if (cat.equals("route")) {
+            // cajeta-llm unit 30 (spec 15.20): a request's routing, at
+            // its completion — per MoE layer which experts fired and how
+            // concentrated (k90 = the experts covering 90% of the
+            // layer's hits; `used` means every token picked one set),
+            // then the request summary. Attributed by session, so a
+            // host can see one conversation's expert affinity — the
+            // seam expert-affinity scheduling builds on.
+            if (nm.equals("layer")) {
+                this.log.debug("route: req=" + sess + " layer=" + v0
+                    + " tokens=" + v1 + " distinct=" + v2 + " k90=" + v3
+                    + " top=" + v4 + " topHits=" + v5);
+            } else {
+                this.log.debug("route: req=" + sess + " tokens=" + v0
+                    + " layers=" + v1 + " experts=" + v2
+                    + " distinctPairs=" + v3 + " meanK90=" + v4
+                    + " hits=" + v5);
+            }
+            return;
+        }
         if (cat.equals("kv-ceiling")) {
             this.log.debug("device kv ceiling: " + (v0 / 1048576L)
                 + " MiB (" + v1 + " slots x " + v2 + " ctx)");

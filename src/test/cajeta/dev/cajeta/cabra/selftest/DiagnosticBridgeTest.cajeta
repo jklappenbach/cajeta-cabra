@@ -175,6 +175,49 @@ public class DiagnosticBridgeTest {
         Assert.equals(1, completed);
     }
 
+    /** cajeta-llm unit 30.3.1 — per-session routing behavior renders
+     *  from the `route` records ALONE: the two record shapes (per-layer,
+     *  then the request summary), fed straight to the bridge, come out
+     *  as lines carrying the session and every field a host needs to
+     *  see one conversation's expert affinity. No engine involved — the
+     *  claim is about the records, and this is what cabra renders. */
+    @Test
+    public void routeRecordsRenderPerSession() {
+        CapturingAppender cap #= heap CapturingAppender();
+        Logger log #= Log.capturing("cabra.engine", Level.DEBUG, #cap);
+        DiagnosticBridge b #= heap DiagnosticBridge(#log);
+        DiagnosticBridge.start(b);
+        {
+            DiagRecord r = heap DiagRecord();
+            r.category #= "route";
+            r.session = 7;
+            r.name #= "layer";
+            r.v0 = 3L; r.v1 = 9L; r.v2 = 5L; r.v3 = 2L; r.v4 = 11L; r.v5 = 9L;
+            b.onRecord(r);
+            r.name #= "request";
+            r.v0 = 9L; r.v1 = 4L; r.v2 = 16L; r.v3 = 20L; r.v4 = 2L; r.v5 = 72L;
+            b.onRecord(r);
+            b.flush();
+            b.close();
+        }
+        Assert.equals(2L, b.publishedCount());
+        boolean sawLayer = false;
+        boolean sawRequest = false;
+        int32 i = 0;
+        while (i < cap.count()) {
+            String ln = cap.get(i);
+            if (ln.contains("route: req=7 layer=3 tokens=9 distinct=5 k90=2 top=11 topHits=9")) {
+                sawLayer = true;
+            }
+            if (ln.contains("route: req=7 tokens=9 layers=4 experts=16 distinctPairs=20 meanK90=2 hits=72")) {
+                sawRequest = true;
+            }
+            i = i + 1;
+        }
+        Assert.isTrue(sawLayer);
+        Assert.isTrue(sawRequest);
+    }
+
     /** 9.1.4 — with no callback registered, nothing is recorded and no
      *  record is even BUILT (the engine's builtCount is the assertable
      *  form; cabra adds that a full serve turn leaves it untouched). */
