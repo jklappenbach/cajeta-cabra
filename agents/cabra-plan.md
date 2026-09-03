@@ -533,10 +533,18 @@ spawning frame. Measured, three shapes.
       crash; the other session's turn is unperturbed (§5.2.7).
       *(CancelTest, 3 cases; the ws arm also pins that a cancel names
       only THIS connection's id — a foreign id is refused.)*
-- [ ] 11.1.4 Protocol-client module tests (vitest, no DOM): auth then
+- [x] 11.1.4 Protocol-client module tests (vitest, no DOM): auth then
       open; chunk/done/error sequencing; reconnect resumes by session id;
       `session_gone` → open + resubmit with a notice; cancel; several
       sessions on one socket.
+      *(web/src/protocol/client.test.ts — 13 tests, all green via an
+      injected SocketLike (no DOM). Covers: auth-first-then-nothing,
+      rejected token vs no-host distinction, open→stream chunks+done
+      +usage, two sessions on one socket kept apart by id, cancel→finish
+      cancel, error before-chunk vs after-chunk sequencing, diag routing,
+      reconnect re-auths + resumes by session id without re-open, redial
+      while host down, and session_gone→reopen+resubmit-the-conversation
+      with a notice.)*
 - [x] 11.1.5 With `"diag":true` a session's records arrive as `diag`
       lines on that request; without it none do and nothing is formatted
       (the does-NOT-fire half).
