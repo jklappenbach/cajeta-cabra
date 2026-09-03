@@ -370,7 +370,7 @@ discussion that produced this section:
   correct, non-interleaved responses.
 - Kill and restart: health reports loading, then ready.
 
-## 10. Web client — DRAFT (Julian, 2026-09-02: "the react http client at the top")
+## 10. Web client (Julian, 2026-09-02: "the react http client at the top"; approved 2026-09-02, all four decisions as recommended)
 
 A browser client for a running host (§5.1.2): the first client that is
 not a terminal, and the surface most people will actually meet. It is
@@ -431,7 +431,7 @@ one exception in 10.5.
   loopback rule stands: the browser runs on the box, or the user brings
   a tunnel.
 
-## 11. primavera — DRAFT (Julian, 2026-09-02: "the incorporation of primavera into cabra right after that")
+## 11. primavera (Julian, 2026-09-02: "the incorporation of primavera into cabra right after that"; approved 2026-09-02 — cabra drives Phase 4 to release)
 
 cabra becomes a **primavera application**. primavera
 (`dev.cajeta.primavera`) is the enterprise layer over the language's DI

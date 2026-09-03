@@ -509,7 +509,7 @@ spawning frame. Measured, three shapes.
 - [ ] 10.3.1 Julian drives three concurrent conversations against one
       resident 72B.
 
-## 11. Web client — DRAFT
+## 11. Web client
 
 *Satisfies spec §10. Depends on unit 7. Top of the focus stack (Julian,
 2026-09-02).*
@@ -556,7 +556,7 @@ spawning frame. Measured, three shapes.
       page, and continues both — with `session_gone` exercised once by
       lowering `--idle-expiry`.
 
-## 12. primavera — DRAFT
+## 12. primavera
 
 *Satisfies spec §11. Depends on unit 11. Second on the focus stack.
 Most of the code lands in cajeta-primavera (its Phase 4); this unit is
