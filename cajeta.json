@@ -48,7 +48,7 @@
         },
 
         "dev-dependencies": {
-            "dev.cajeta.unit": "0.2.2"
+            "dev.cajeta.unit": "0.2.3"
         },
 
         "repositories": [

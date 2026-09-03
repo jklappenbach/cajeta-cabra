@@ -401,11 +401,16 @@ public class HostTest {
         String op #= HostTest.recvText(ws);
         JsonValue ov #= Json.parse(op);
         qr.session = ov.object().get("session").asInt64();
-        // Back to back, no reads in between: 11 must occupy the slot
-        // long enough (n=64) for 12 and 13 to arrive behind it.
+        // Back to back, no reads in between: 11 must still occupy the
+        // one slot when 12 and 13 arrive behind it. A big budget on the
+        // roomy engine keeps 11 in flight for a real interval, so 12
+        // queues and 13 sheds regardless of core count — with n=64 on
+        // the 128-ctx toy, 11 finished before 12 was even dispatched on
+        // a 2-core box, 12 took the freed slot, 13 was ADMITTED (never
+        // shed), and the client waited forever for the CAPACITY error.
         ws.send("{\"op\":\"generate\",\"id\":11,\"session\":" + qr.session
             + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
-            + "\",\"n\":64,\"temp\":0}");
+            + "\",\"n\":1500,\"temp\":0}");
         ws.send("{\"op\":\"generate\",\"id\":12,\"session\":" + qr.session
             + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_B
             + "\",\"n\":6,\"temp\":0}");
@@ -505,7 +510,9 @@ public class HostTest {
     public void beyondCapacityQueuesThenRunsBeyondTheBoundSheds() {
         String soloB #= ConcurrencyTest.serialRun("tmp/ht-q-b.jsonl",
             12L, ConcurrencyTest.PROMPT_B);
-        LlmEngine e #= ConcurrencyTest.engine(1);
+        // Roomy so id 11's big budget keeps it in flight while 12 queues
+        // and 13 sheds — see runQueueTriple. One slot, queue bound 1.
+        LlmEngine e #= ConcurrencyTest.roomyEngine(1);
         Host h = heap Host(#e, HostTest.TOKEN, 2, 1, 60000L);
         h.setQueueBound(1);
         h.listen(0);

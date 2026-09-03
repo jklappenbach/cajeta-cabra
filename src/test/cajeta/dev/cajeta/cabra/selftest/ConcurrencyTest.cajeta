@@ -107,6 +107,19 @@ public class ConcurrencyTest {
         return #LlmEngine.load(#opts);
     }
 
+    /** A toy engine with a big ctx and a caller-chosen slot count. A
+     *  request given a large budget on this engine stays in flight for
+     *  a real interval, so a test that must reach a specific slot/queue
+     *  interleaving (e.g. 11 running, 12 queued, 13 shed) reaches it on
+     *  ANY core count instead of racing the reader fiber against a
+     *  64-token toy turn that finishes in microseconds. */
+    static #LlmEngine roomyEngine(int32 maxSeqs) {
+        EngineOptions opts = heap EngineOptions(ConcurrencyTest.TOY);
+        opts.ctx = 2048;
+        opts.maxSeqs = maxSeqs;
+        return #LlmEngine.load(#opts);
+    }
+
     static #String genLine(int64 id, String prompt) {
         String s = "{\"op\":\"generate\",\"id\":" + id + ",\"prompt\":\""
             + prompt + "\",\"n\":6,\"temp\":0}";
