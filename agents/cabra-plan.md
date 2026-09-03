@@ -508,3 +508,85 @@ spawning frame. Measured, three shapes.
 ### 10.3 Acceptance
 - [ ] 10.3.1 Julian drives three concurrent conversations against one
       resident 72B.
+
+## 11. Web client — DRAFT
+
+*Satisfies spec §10. Depends on unit 7. Top of the focus stack (Julian,
+2026-09-02).*
+
+### 11.1 TDD
+- [ ] 11.1.1 `cabra host --web <dir>` answers `GET /` with `<dir>/index.html`
+      (200, `text/html`), an asset by path with its content type, and a
+      missing path with 404; without `--web` a plain GET is refused as
+      today. (cajeta test over a loopback socket.)
+- [ ] 11.1.2 `GET /ws` still upgrades, and a ws client's turn is
+      byte-identical to unit 8's ClientTest transcript — the HTTP front
+      changes nothing on the socket.
+- [ ] 11.1.3 `cancel` ends an in-flight turn with `finish: "cancel"`, on
+      stdio and on ws; a cancel for an unknown id is an error, not a
+      crash; the other session's turn is unperturbed (§5.2.7).
+- [ ] 11.1.4 Protocol-client module tests (vitest, no DOM): auth then
+      open; chunk/done/error sequencing; reconnect resumes by session id;
+      `session_gone` → open + resubmit with a notice; cancel; several
+      sessions on one socket.
+- [ ] 11.1.5 With `"diag":true` a session's records arrive as `diag`
+      lines on that request; without it none do and nothing is formatted
+      (the does-NOT-fire half).
+
+### 11.2 Coding
+- [ ] 11.2.1 `cancel` op: `Protocol`, `ServeCore`, `Serve` (stdio),
+      `Host` (ws) — engine-side request cancel via the scheduler; `Wire`
+      finish reason `cancel`; the CLI client maps Ctrl-C to it.
+- [ ] 11.2.2 HTTP front on the host listener: non-upgrade requests go to
+      cajeta-http `StaticFile` rooted at `--web`; `/ws` to the existing
+      `WsUpgrade` path. (Unit 12 replaces this with `HttpServer`/`Router`
+      under primavera; keep the seam narrow.)
+- [ ] 11.2.3 Optional per-request diag forwarding through the unit-9
+      bridge (`RecordBridge`) to the owning connection.
+- [ ] 11.2.4 `web/` — Vite + React + TypeScript: `protocol/` (the tested
+      state machine), `ui/` (conversation list, transcript with streaming
+      + markdown-on-complete, sampling panel, token prompt, health badge,
+      diag panel), localStorage persistence.
+- [ ] 11.2.5 CI: `npm ci && npm run build` on the cabra workflow; the
+      release bundles `web/dist` beside the executable; `docs/web.md`.
+
+### 11.3 Acceptance
+- [ ] 11.3.1 Julian opens `http://127.0.0.1:<port>/` against a resident
+      30B, holds two conversations, stops one mid-answer, reloads the
+      page, and continues both — with `session_gone` exercised once by
+      lowering `--idle-expiry`.
+
+## 12. primavera — DRAFT
+
+*Satisfies spec §11. Depends on unit 11. Second on the focus stack.
+Most of the code lands in cajeta-primavera (its Phase 4); this unit is
+the cabra side plus the primavera work cabra forces.*
+
+### 12.1 TDD
+- [ ] 12.1.1 Units 6–8's suites pass unchanged against the primavera
+      assembly (SessionCoreTest, HostTest, ClientTest — the byte-level
+      bars).
+- [ ] 12.1.2 Session expiry under a `ManualTimeSource`: open, advance past
+      idle, `session_gone`; touch before expiry keeps it (§5.2.4, now
+      primavera's clock).
+- [ ] 12.1.3 Request scope crosses the host's fiber handoffs: a
+      request-scoped component resolved in the reader is the same instance
+      in the host loop and the writer for that message, and different
+      across concurrent messages.
+- [ ] 12.1.4 The `@Rest` surface: `GET /health` returns the health object
+      via serde; the static route and `/ws` are declared routes.
+
+### 12.2 Coding
+- [ ] 12.2.1 primavera Phase 4 (in cajeta-primavera, its own spec/plan):
+      request-scope binding at the `HttpServer` handler boundary;
+      `@RestServer`/`@Rest` routing with typed serde; `SessionStore` over
+      the server. Released; cabra pins it.
+- [ ] 12.2.2 cabra: `SessionRegistry` → primavera `SessionScope`;
+      `ws/Host` accept loop → `HttpServer` + `Router`; components for
+      engine / template / credential / diag bridge; `Main` assembles the
+      graph.
+- [ ] 12.2.3 `docs/architecture.md`: cabra as a primavera application.
+
+### 12.3 Acceptance
+- [ ] 12.3.1 The unit-11 live pass (11.3.1) repeats on the primavera
+      assembly with the same result.

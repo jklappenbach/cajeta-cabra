@@ -369,3 +369,106 @@ discussion that produced this section:
 - Two concurrent clients (if 5.1 = batching) both complete with
   correct, non-interleaved responses.
 - Kill and restart: health reports loading, then ready.
+
+## 10. Web client — DRAFT (Julian, 2026-09-02: "the react http client at the top")
+
+A browser client for a running host (§5.1.2): the first client that is
+not a terminal, and the surface most people will actually meet. It is
+a CLIENT in §5.1's sense — it holds the conversation state (§5.2.8),
+names its session (§5.2.1), and speaks the §3 op set over WebSocket
+(§5.4.1). It adds no op the CLI client does not already need, with the
+one exception in 10.5.
+
+- **10.1 Served by the host.** When cabra runs `host --web <dir>`, plain
+  HTTP GETs on the listening port serve the built client from `<dir>`
+  (`/` → `index.html`, assets by path, correct content types, 404
+  otherwise), and `GET /ws` with an Upgrade header is the §5.4.1
+  WebSocket. Without `--web` the host behaves exactly as today: ws only.
+  One port, one process, nothing else to start — this is §2.5's
+  "a link installs cabra, and cabra serves".
+- **10.2 Client-held state.** The client keeps every conversation in the
+  browser (localStorage): messages, sampling parameters, and the session
+  id it last held. A page reload loses nothing; the host holds only a
+  cache (§5.2.8).
+- **10.3 Token.** The first thing the client asks for is the host token
+  (§5.5.1), kept for the browser session and presented as the `auth` op
+  before any other. A rejected token is reported as such, not as a
+  connection failure.
+- **10.4 Streaming.** Chunks render as they arrive; the finish reason and
+  usage (§3.1.2) are shown when the turn ends; an error after tokens
+  have streamed is shown on the partial answer, an error before is shown
+  in place of one (§4.4). Text is rendered as markdown once complete and
+  as plain text while streaming, so partial fences never flash.
+- **10.5 Stop.** The user can stop a turn in flight. This needs a
+  `cancel` op — `{"op":"cancel","id":N}` ends request N with
+  `finish: "cancel"` — which the protocol does not have. It is added
+  here, on every transport, and the CLI client gains it too
+  (Ctrl-C on a `--connect` turn).
+- **10.6 Reconnect and resume.** When the socket drops, the client
+  reconnects and continues by session id; a warm resume costs a re-prefill
+  at most. When the host answers `session_gone` (§5.2.5), the client
+  opens a new session and RESUBMITS the conversation — the §5.2.8
+  guarantee made visible, and the user sees it happen (a notice, not a
+  silent retry).
+- **10.7 Several conversations.** The client lists its conversations and
+  may hold several open, each its own session on one connection
+  (§5.2.6). Switching never cancels the other's turn.
+- **10.8 Health.** The client shows the host's state and model
+  (`health`), and refuses to send while the host is loading.
+- **10.9 Diagnostics, optional.** The route/prefill-mode/expert-cache
+  records the host logs (§8.2) may be forwarded to the client that owns
+  the session as `{"id":N,"diag":{...}}` lines when the client asks for
+  them (`"diag":true` on the request). The client shows them in a
+  collapsed panel. Default off; nothing is formatted when off.
+- **10.10 Toolchain.** The client is React + TypeScript built with Vite
+  under `web/`; `npm run build` produces `web/dist`. The protocol client
+  (socket, auth, session, resume, cancel — a state machine with no DOM)
+  is a module with its own tests, so the host-facing behaviour is
+  testable without a browser. The built `dist` is not committed; CI
+  builds it and the release bundles it beside the executable.
+- **10.11 Same-origin only.** The host serves the client and the
+  socket from one origin, so no CORS surface is opened. §5.5.2's
+  loopback rule stands: the browser runs on the box, or the user brings
+  a tunnel.
+
+## 11. primavera — DRAFT (Julian, 2026-09-02: "the incorporation of primavera into cabra right after that")
+
+cabra becomes a **primavera application**. primavera
+(`dev.cajeta.primavera`) is the enterprise layer over the language's DI
+substrate and `dev.cajeta.http`: request/session scope, stereotypes,
+and — its Phase 4, deferred on 2026-07-19 because cajeta-http had no
+usable server surface — the web request/session model (`@RestServer` /
+`@Rest` routing with typed serde). cabra now runs on cajeta-http's
+WebSocket and, with §10, its HTTP server, so cabra is the consumer
+Phase 4 was waiting for. This section is the contract from cabra's side;
+primavera's own spec owns the framework.
+
+- **11.1 Sessions are primavera sessions.** cabra's session (§5.2) is a
+  primavera `SessionScope` entry: id issuance, idle expiry on a
+  `TimeSource`, explicit close, and the three-valued lookup
+  (open / gone / unknown) that §5.2.5 needs. `SessionRegistry` is
+  retired in favour of it; the §5.2 use cases and their tests are the
+  acceptance bar and must pass unchanged.
+- **11.2 A turn is a request.** Each protocol message is handled inside a
+  primavera request scope, so request-scoped components (the parsed
+  request, the session, the emitter for that turn) resolve by injection
+  rather than by parameter threading. Scope propagates correctly across
+  the fiber handoffs the host already makes (accept → reader → host loop
+  → writer).
+- **11.3 The HTTP surface is declared, not hand-routed.** §10.1's static
+  route, `/ws`, `health`, and any later REST endpoint are `@Rest`
+  handlers on a `@RestServer`; serde to and from the typed `Req` model
+  is primavera's. The raw accept loop in `ws/Host` is replaced by
+  cajeta-http's `HttpServer` + `Router` under primavera policy.
+- **11.4 Components.** The engine, the chat template, the token
+  credential and the diagnostic bridge are components with declared
+  lifecycle; tests assemble a cabra from the same graph with a scripted
+  engine, which is what unit 6's `MemChannel` tests do today by hand.
+- **11.5 Nothing the user can see changes.** The op set, session ids,
+  error kinds, and both transports behave byte-for-byte as before
+  (units 6–8's tests are the regression bar); only the assembly does.
+- **11.6 primavera Phase 4 ships from this work.** What cabra needs and
+  primavera lacks (request-scope binding at the handler boundary, the
+  `@Rest` routing and serde, the session store over `HttpServer`) is
+  built in primavera, spec'd there, and released; cabra pins the
+  release. cabra carries no framework code of its own.
