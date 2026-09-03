@@ -17,6 +17,7 @@ import cajeta.lang.String;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
 import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.llm.EngineOptions;
 import dev.cajeta.llm.LlmEngine;
 import dev.cajeta.cabra.stdio.Serve;
 import dev.cajeta.cabra.ws.Host;
@@ -170,6 +171,18 @@ public class CancelTest {
         return 0;
     }
 
+    /** A roomy engine for the ws cancel race: a big ctx and a big budget
+     *  so the turn is still generating when the cancel round-trips, on
+     *  any core count. With the shared 128-ctx toy engine and n=40 the
+     *  whole turn finished before the cancel landed on a 2-core box, and
+     *  the turn reported "budget" — a test flake, not an engine bug. */
+    static #LlmEngine roomyEngine() {
+        EngineOptions opts = heap EngineOptions(ConcurrencyTest.TOY);
+        opts.ctx = 2048;
+        opts.maxSeqs = 2;
+        return #LlmEngine.load(#opts);
+    }
+
     static async int32 runCanceller(CancelRun cr) {
         IpAddress a #= IpAddress.loopbackV4();
         SocketAddress addr #= SocketAddress.of(#a, cr.port);
@@ -199,7 +212,7 @@ public class CancelTest {
 
         ws.send("{\"op\":\"generate\",\"id\":7,\"session\":" + cr.session
             + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
-            + "\",\"n\":40,\"temp\":0}");
+            + "\",\"n\":1500,\"temp\":0}");
         boolean sent = false;
         while (true) {
             String line #= HostTest.recvText(ws);
@@ -232,7 +245,7 @@ public class CancelTest {
         String soloB #= ConcurrencyTest.serialRun("tmp/cx-ws-solo-b.jsonl",
             2L, ConcurrencyTest.PROMPT_B);
 
-        LlmEngine e #= ConcurrencyTest.engine(2);
+        LlmEngine e #= CancelTest.roomyEngine();
         Host h = heap Host(#e, HostTest.TOKEN, 4, 2, 60000L);
         h.listen(0);
 
@@ -253,7 +266,7 @@ public class CancelTest {
         Assert.equals("bad_request", cx.foreignErrKind);
         Assert.equals("cancel", cx.finish);
         Assert.isTrue(cx.chunks > 0);
-        Assert.isTrue(cx.chunks < 40);
+        Assert.isTrue(cx.chunks < 1500);
         Assert.isTrue(cb.acc.equals(soloB));
         Assert.isTrue(cb.finish.byteLength() > 0);
     }
