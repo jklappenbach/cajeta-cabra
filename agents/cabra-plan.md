@@ -579,18 +579,30 @@ spawning frame. Measured, three shapes.
       unless --verbose holds it. Wire: `{"id":N,"diag":{"cat","name",
       "text","v":[6]}}` on both transports. `Main` builds the bridge in
       every mode now; --verbose only decides logging + always-on.)*
-- [ ] 11.2.4 `web/` — Vite + React + TypeScript: `protocol/` (the tested
-      state machine), `ui/` (conversation list, transcript with streaming
-      + markdown-on-complete, sampling panel, token prompt, health badge,
-      diag panel), localStorage persistence.
-- [ ] 11.2.5 CI: `npm ci && npm run build` on the cabra workflow; the
+- [x] 11.2.4 `web/` — Vite + React + TypeScript: `protocol/client.ts`
+      (the tested state machine), `App.tsx` (conversation list, transcript
+      with streaming + markdown-on-complete via marked+DOMPurify, sampling
+      panel, token gate, health badge, diag panel), localStorage
+      persistence. Both themes from one token set.
+      *(13 vitest cases pin the protocol; the UI drives that client.)*
+- [~] 11.2.5 CI: `npm ci && npm run build` on the cabra workflow; the
       release bundles `web/dist` beside the executable; `docs/web.md`.
+      *(`docs/web.md` written; `web/dist` and `node_modules` gitignored,
+      built by CI. The workflow wiring is BLOCKED on cabra having no
+      `.github/workflows` yet — cabra has never been release-packaged;
+      folded into unit 12's release step or a cabra-CI task.)*
 
 ### 11.3 Acceptance
-- [ ] 11.3.1 Julian opens `http://127.0.0.1:<port>/` against a resident
+- [~] 11.3.1 Julian opens `http://127.0.0.1:<port>/` against a resident
       30B, holds two conversations, stops one mid-answer, reloads the
       page, and continues both — with `session_gone` exercised once by
       lowering `--idle-expiry`.
+      *(Claude verified the live path on the 8B/hip: token gate, connect,
+      streaming turn rendered as markdown, usage block on ws
+      (47 prompt / 61 generated, prefill 336 ms / decode 2293 ms),
+      multi-turn in one conversation. Awaiting Julian's own pass —
+      especially the two-conversation + stop + reload + session_gone
+      sequence.)*
 
 ## 12. primavera
 

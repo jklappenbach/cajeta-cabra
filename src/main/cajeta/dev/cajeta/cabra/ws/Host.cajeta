@@ -71,6 +71,8 @@ public final class Host implements TokenSink {
     int64[] trId;
     int32[] trConn;
     int32[] trPromptLen;
+    int64[] trT0Ns;            // submit time; usage's prefill_ms base
+    int64[] trFirstNs;         // first token; 0 until one arrives
     boolean[] trOpen;
     boolean[] trDiag;          // §10.9: this request asked for records
     int32 idleSteps;
@@ -114,6 +116,8 @@ public final class Host implements TokenSink {
         this.trId = heap int64[this.cap];
         this.trConn = heap int32[this.cap];
         this.trPromptLen = heap int32[this.cap];
+        this.trT0Ns = heap int64[this.cap];
+        this.trFirstNs = heap int64[this.cap];
         this.trOpen = heap boolean[this.cap];
         this.trDiag = heap boolean[this.cap];
         this.idleSteps = 0;
@@ -497,6 +501,8 @@ public final class Host implements TokenSink {
         this.trId[slot] = r.id;
         this.trConn[slot] = connSlot;
         this.trPromptLen[slot] = n;
+        this.trT0Ns[slot] = Clock.nanoTime();
+        this.trFirstNs[slot] = 0L;
         this.trOpen[slot] = true;
         this.trDiag[slot] = r.diag;
         if (r.diag) {
@@ -639,7 +645,20 @@ public final class Host implements TokenSink {
                     if (q.finishReason() == Request.FINISH_CANCEL) {
                         finish = "cancel";
                     }
-                    String m #= Wire.done(this.trId[i], finish);
+                    // §3.1.2: the done line carries usage on this
+                    // transport too — the web client shows it.
+                    int64 endNs = Clock.nanoTime();
+                    int64 pMs = 0L;
+                    int64 dMs = 0L;
+                    if (this.trFirstNs[i] > 0L) {
+                        pMs = (this.trFirstNs[i] - this.trT0Ns[i]) / 1000000L;
+                        dMs = (endNs - this.trFirstNs[i]) / 1000000L;
+                    } else {
+                        pMs = (endNs - this.trT0Ns[i]) / 1000000L;
+                    }
+                    String m #= Wire.doneUsage(this.trId[i], finish,
+                        (int64) this.trPromptLen[i],
+                        (int64) q.generatedCount(), pMs, dMs);
                     this.say(this.trConn[i], m);
                     this.trOpen[i] = false;
                     if (this.trDiag[i]) {
@@ -717,6 +736,9 @@ public final class Host implements TokenSink {
         int32 i = 0;
         while (i < this.cap) {
             if (this.trOpen[i] && this.trRid[i] == reqId) {
+                if (this.trFirstNs[i] == 0L) {
+                    this.trFirstNs[i] = Clock.nanoTime();
+                }
                 this.ensureChunker();
                 int32[] one #= heap int32[1];
                 one[0] = tok;

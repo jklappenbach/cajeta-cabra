@@ -13,3 +13,8 @@ build/
 *.cja
 src/main/cajeta/*.c
 app.jsonl
+
+# web client: committed source, not deps or build output (CI runs npm
+# ci && npm run build; the release bundles web/dist).
+web/node_modules/
+web/dist/

@@ -100,6 +100,16 @@ public final class Wire {
         return #= "{\"id\":" + id + ",\"diag\":" + body + "}";
     }
 
+    /** The done line with its usage block (§3.1.2), the stdio shape. */
+    public static #String doneUsage(int64 id, String finish,
+            int64 promptTokens, int64 genTokens, int64 prefillMs,
+            int64 decodeMs) {
+        return #= "{\"id\":" + id + ",\"done\":true,\"finish\":\""
+            + finish + "\",\"usage\":{\"prompt_tokens\":" + promptTokens
+            + ",\"gen_tokens\":" + genTokens + ",\"prefill_ms\":"
+            + prefillMs + ",\"decode_ms\":" + decodeMs + "}}";
+    }
+
     public static #String done(int64 id, String finish) {
         return #= "{\"id\":" + id + ",\"done\":true,\"finish\":\""
             + finish + "\"}";
