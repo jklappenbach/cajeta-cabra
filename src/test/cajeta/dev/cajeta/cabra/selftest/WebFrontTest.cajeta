@@ -1,0 +1,316 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.concurrent.Tasks;
+import cajeta.io.file.File;
+import cajeta.io.file.Path;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.io.net.uri.Uri;
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.http.HeaderValues;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h1.HttpParser;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.http.ws.WsUpgrade;
+import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.cabra.ws.Host;
+
+/**
+ * Plan 11.1.1 + 11.1.2 (spec §10.1) — the host's HTTP front. With
+ * `--web <dir>` a plain GET serves the built client from the directory
+ * (index for `/`, assets by path with their content type, 404 for a
+ * missing path, on ONE keep-alive connection the way a browser fetches
+ * a page); `/ws` with an Upgrade header is the same WebSocket as
+ * before, and a turn over it is what unit 7's clients get. Without
+ * `--web` a plain GET is answered 404 and the connection closed, so
+ * nothing but the socket protocol is reachable — as today.
+ */
+public class WebFrontTest {
+
+    static final String ROOT = "tmp/wf-web";
+
+    public WebFrontTest() { return; }
+
+    /** One browser-shaped run: three GETs on one connection. */
+    static class WebRun {
+        public int32 port;
+        public int32 status0;
+        public String ctype0;
+        public String body0;
+        public int32 status1;
+        public String ctype1;
+        public int32 status2;
+        public boolean done;
+        public WebRun() {
+            this.port = 0;
+            this.status0 = 0;
+            this.ctype0 = "";
+            this.body0 = "";
+            this.status1 = 0;
+            this.ctype1 = "";
+            this.status2 = 0;
+            this.done = false;
+        }
+    }
+
+    /** A ws client on `/ws` that runs one 3-token turn, then shuts the
+     *  host down once the browser run has finished. */
+    static class WsRun {
+        public int32 port;
+        public WebRun after;
+        public String finish;
+        public int32 chunks;
+        public WsRun() {
+            this.port = 0;
+            this.after = null;
+            this.finish = "";
+            this.chunks = 0;
+        }
+    }
+
+    static void writeSite() {
+        Path d #= Path.of(WebFrontTest.ROOT);
+        d.mkdirs();
+        String html = "<!doctype html><title>cabra</title><div id=app></div>";
+        int8[] hb #= html.toBytes();
+        File.writeAllBytes(WebFrontTest.ROOT + "/index.html", hb,
+            (int64) hb.count());
+        String js = "console.log('cabra');";
+        int8[] jb #= js.toBytes();
+        File.writeAllBytes(WebFrontTest.ROOT + "/app.js", jb,
+            (int64) jb.count());
+        return;
+    }
+
+    /** Read one HTTP/1.1 response off the reader, staging any bytes
+     *  past it back — the same one-byte discipline the ws upgrade
+     *  uses, so a keep-alive follow-up is not swallowed. */
+    static #HttpResponse readResponse(AsyncReader rd) {
+        HttpParser p #= HttpParser.forResponse();
+        int8[] one = heap int8[1];
+        while (!p.isComplete()) {
+            int32 n = rd.read(one, 0, 1);
+            if (n == 0) {
+                p.endInput();
+                break;
+            }
+            p.feed(one, 1);
+        }
+        HttpResponse resp #= p.takeResponse();
+        int8[] left #= p.leftover();
+        int32 ll = p.leftoverLength();
+        if (ll > 0) {
+            rd.stage(left, ll);
+        }
+        // The parser stops at the head; the body is Content-Length
+        // bytes that follow, and on a keep-alive connection they MUST
+        // be consumed or the next status line is read out of them.
+        int64 cl = HeaderValues.contentLength(resp.getHeaders());
+        if (cl > 0L) {
+            int32 n = (int32) cl;
+            int8[] body #= heap int8[n];
+            int32 got = 0;
+            while (got < n) {
+                int32 r = rd.read(body, got, n - got);
+                if (r <= 0) {
+                    break;
+                }
+                got = got + r;
+            }
+            resp.body(body, got);
+        }
+        return #resp;
+    }
+
+    static void sendGet(AsyncWriter wr, String path) {
+        String req = "GET " + path + " HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n";
+        int8[] b #= req.toBytes();
+        wr.writeAll(b, 0, b.count());
+        wr.flush();
+        return;
+    }
+
+    static #String ctypeOf(HttpResponse r) {
+        String v #= r.getHeaders().get("Content-Type");
+        if (v == null) {
+            return #heap String();
+        }
+        return #v;
+    }
+
+    static async int32 runBrowser(WebRun w) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, w.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+
+        WebFrontTest.sendGet(wr, "/");
+        HttpResponse r0 #= WebFrontTest.readResponse(rd);
+        w.status0 = r0.statusCode();
+        String c0 #= WebFrontTest.ctypeOf(r0);
+        w.ctype0 = c0;
+        if (r0.hasBody) {
+            int32 bn = (int32) r0.body.count();
+            int8[] copy #= heap int8[bn];
+            int32 k = 0;
+            while (k < bn) {
+                copy[k] = r0.body[k];
+                k = k + 1;
+            }
+            String b0 = heap String(#copy, bn);
+            w.body0 = b0;
+        }
+
+        WebFrontTest.sendGet(wr, "/app.js");
+        HttpResponse r1 #= WebFrontTest.readResponse(rd);
+        w.status1 = r1.statusCode();
+        String c1 #= WebFrontTest.ctypeOf(r1);
+        w.ctype1 = c1;
+
+        WebFrontTest.sendGet(wr, "/nope.txt");
+        HttpResponse r2 #= WebFrontTest.readResponse(rd);
+        w.status2 = r2.statusCode();
+
+        sock.close();
+        w.done = true;
+        return 0;
+    }
+
+    /** Without a web root: a plain GET is 404 and the connection is
+     *  closed — the next read sees EOF. */
+    static async int32 runRefused(WebRun w) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, w.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebFrontTest.sendGet(wr, "/");
+        HttpResponse r0 #= WebFrontTest.readResponse(rd);
+        w.status0 = r0.statusCode();
+        int8[] one = heap int8[1];
+        int32 n = 1;
+        try {
+            n = rd.read(one, 0, 1);
+        } catch (Exception e) {
+            n = 0;
+        }
+        w.status1 = n == 0 ? 0 : 1;   // 0 = closed, as required
+        sock.close();
+        w.done = true;
+        return 0;
+    }
+
+    static async int32 runWs(WsRun r) {
+        int32 tries = 0;
+        while (r.after != null && !r.after.done && tries < 2000) {
+            Tasks.sleepMillis(5L);
+            tries = tries + 1;
+        }
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, r.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        Uri u #= Uri.builder().scheme("ws").host("127.0.0.1")
+            .port(r.port).path("/ws").build();
+        WebSocket ws #= WsUpgrade.connectClient(rd, wr, u, 424242);
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        ws.send("{\"op\":\"open\",\"id\":3}");
+        String op #= HostTest.recvText(ws);
+        JsonValue ov #= Json.parse(op);
+        int64 sid = ov.object().get("session").asInt64();
+        ws.send("{\"op\":\"generate\",\"id\":3,\"session\":" + sid
+            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
+            + "\",\"n\":3,\"temp\":0}");
+        while (true) {
+            String line #= HostTest.recvText(ws);
+            if (line == null) {
+                break;
+            }
+            JsonValue v #= Json.parse(line);
+            JsonObject o = v.object();
+            if (o.containsKey("chunk")) {
+                r.chunks = r.chunks + 1;
+            } else if (o.containsKey("done")) {
+                String f #= o.get("finish").asString();
+                r.finish = f;
+                break;
+            }
+        }
+        ws.send("{\"op\":\"shutdown\"}");
+        Tasks.sleepMillis(200L);
+        sock.close();
+        return 0;
+    }
+
+    /** 11.1.1 + 11.1.2 — `--web`: index, asset, 404, then the socket
+     *  on `/ws` serves a turn as before. */
+    @Test
+    public void theHostServesTheClientAndStillUpgrades() {
+        WebFrontTest.writeSite();
+        LlmEngine e #= ConcurrencyTest.engine(1);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 2, 60000L);
+        h.setWebRoot(WebFrontTest.ROOT);
+        h.listen(0);
+
+        WebRun w = heap WebRun();
+        w.port = h.port;
+        WsRun s = heap WsRun();
+        s.port = h.port;
+        s.after = w;
+
+        scope {
+            spawn runBrowser(w);
+            spawn runWs(s);
+            h.run();
+            h.shutdown();
+        }
+
+        Assert.isTrue(w.done);
+        Assert.equals(200L, (int64) w.status0);
+        Assert.isTrue(w.ctype0.startsWith("text/html"));
+        Assert.isTrue(w.body0.contains("<div id=app>"));
+        Assert.equals(200L, (int64) w.status1);
+        Assert.isTrue(w.ctype1.contains("javascript"));
+        Assert.equals(404L, (int64) w.status2);
+        Assert.equals("budget", s.finish);
+        Assert.isTrue(s.chunks > 0);
+    }
+
+    /** The does-NOT-serve half: no `--web`, a plain GET is 404 and
+     *  closed; the socket protocol is untouched. */
+    @Test
+    public void withoutAWebRootAPlainGetIsRefused() {
+        LlmEngine e #= ConcurrencyTest.engine(1);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 2, 60000L);
+        h.listen(0);
+
+        WebRun w = heap WebRun();
+        w.port = h.port;
+        WsRun s = heap WsRun();
+        s.port = h.port;
+        s.after = w;
+
+        scope {
+            spawn runRefused(w);
+            spawn runWs(s);
+            h.run();
+            h.shutdown();
+        }
+
+        Assert.isTrue(w.done);
+        Assert.equals(404L, (int64) w.status0);
+        Assert.equals(0L, (int64) w.status1);
+        Assert.equals("budget", s.finish);
+    }
+}

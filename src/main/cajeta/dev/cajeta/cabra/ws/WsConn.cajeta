@@ -9,9 +9,15 @@ import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.TcpStream;
 import cajeta.lang.String;
+import dev.cajeta.http.HttpRequest;
+import dev.cajeta.http.HttpResponse;
+import dev.cajeta.http.h1.HttpParser;
+import dev.cajeta.http.h1.HttpSerializer;
+import dev.cajeta.http.middleware.Middleware;
+import dev.cajeta.http.middleware.StaticFile;
 import dev.cajeta.http.ws.WebSocket;
 import dev.cajeta.http.ws.WsMessage;
-import dev.cajeta.http.ws.WsUpgrade;
+import dev.cajeta.http.ws.WsServerHandshake;
 import dev.cajeta.cabra.io.LineReader;
 
 /**
@@ -164,9 +170,29 @@ public final class WsConn {
      *  ring protocol. `hostCh` is a lending channel of conn slots; the
      *  LINE lives in this connection's inbound ring. */
     public static async int32 readLoop(WsConn c, Host h) {
+        // §10.1: an HTTP/1.1 front on the same socket. Plain requests
+        // are answered from the web root on a keep-alive loop (a page
+        // then its assets, one connection — what a browser does);
+        // the first request carrying an Upgrade is the WebSocket, on
+        // any path. No web root: 404 and close, so only the socket
+        // protocol is reachable, as before this front existed.
         try {
-            WebSocket w #= WsUpgrade.acceptServer(c.rd, c.wr);
-            c.ws #= w;
+            while (true) {
+                HttpRequest req #= WsConn.readRequest(c.rd);
+                if (WsServerHandshake.isUpgradeRequest(req)) {
+                    HttpResponse hs #= WsServerHandshake.accept(req);
+                    int8[] hb #= HttpSerializer.response(hs);
+                    c.wr.writeAll(hb, 0, hb.count());
+                    c.wr.flush();
+                    WebSocket w #= WebSocket.forServer(c.rd, c.wr);
+                    c.ws #= w;
+                    break;
+                }
+                boolean keep = WsConn.answerPlain(h.webRoot(), req, c.wr);
+                if (!keep) {
+                    throw heap Exception("plain request answered and closed");
+                }
+            }
         } catch (Exception e) {
             c.dead = true;
             h.connGone(c.slot);
@@ -206,6 +232,62 @@ public final class WsConn {
         h.connGone(c.slot);
         c.readerDone = true;
         return 0;
+    }
+
+    /** Read one HTTP/1.1 request head (+ body) a byte at a time and
+     *  stage what follows it back, so an upgrade's first frame or a
+     *  pipelined GET is not swallowed — the ws library's own discipline
+     *  (`WsUpgrade.readRequest`, which is not public). */
+    static #HttpRequest readRequest(AsyncReader rd) {
+        HttpParser p #= HttpParser.forRequest();
+        int8[] one = heap int8[1];
+        while (!p.isComplete()) {
+            int32 n = rd.read(one, 0, 1);
+            if (n == 0) {
+                p.endInput();
+                break;
+            }
+            p.feed(one, 1);
+        }
+        HttpRequest req #= p.takeRequest();
+        int8[] left #= p.leftover();
+        int32 ll = p.leftoverLength();
+        if (ll > 0) {
+            rd.stage(left, ll);
+        }
+        return #req;
+    }
+
+    /** Answer a non-upgrade request: from the web root through the
+     *  library's jailed StaticFile middleware (a miss falls through to
+     *  404), or 404 outright with no root. Returns whether to keep the
+     *  connection for another request. */
+    static boolean answerPlain(StaticFile web, HttpRequest req,
+            AsyncWriter wr) {
+        HttpResponse resp = null;
+        boolean keep = false;
+        if (web == null) {
+            resp #= HttpResponse.of(404);
+            resp.setHeader("Connection", "close");
+        } else {
+            Middleware m #= StaticFile.middleware(web);
+            (HttpRequest) -> #HttpResponse miss = (q) -> HttpResponse.of(404);
+            (HttpRequest) -> #HttpResponse handler #= Middleware.wrapOne(m, miss);
+            resp #= handler(req);
+            String cn #= req.getHeaders().get("Connection");
+            keep = true;
+            if (cn != null) {
+                String lc #= cn.toLowerCase();
+                keep = !lc.contains("close");
+            }
+            if (!keep) {
+                resp.setHeader("Connection", "close");
+            }
+        }
+        int8[] b #= HttpSerializer.response(resp);
+        wr.writeAll(b, 0, b.count());
+        wr.flush();
+        return keep;
     }
 
     public String inLineAt(int32 s) {

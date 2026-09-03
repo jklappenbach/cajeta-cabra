@@ -515,13 +515,19 @@ spawning frame. Measured, three shapes.
 2026-09-02).*
 
 ### 11.1 TDD
-- [ ] 11.1.1 `cabra host --web <dir>` answers `GET /` with `<dir>/index.html`
+- [x] 11.1.1 `cabra host --web <dir>` answers `GET /` with `<dir>/index.html`
       (200, `text/html`), an asset by path with its content type, and a
       missing path with 404; without `--web` a plain GET is refused as
       today. (cajeta test over a loopback socket.)
-- [ ] 11.1.2 `GET /ws` still upgrades, and a ws client's turn is
+      *(WebFrontTest: three GETs on ONE keep-alive connection, the way a
+      browser fetches a page; without a root, 404 + close, EOF observed.
+      Live: curl 200/200/404 and 403 on `/../etc/passwd` — the
+      library's jail.)*
+- [x] 11.1.2 `GET /ws` still upgrades, and a ws client's turn is
       byte-identical to unit 8's ClientTest transcript — the HTTP front
       changes nothing on the socket.
+      *(WebFrontTest dials `/ws` and runs a turn on the same host after
+      the GETs; ClientTest/HostTest unchanged and green, 54/0.)*
 - [x] 11.1.3 `cancel` ends an in-flight turn with `finish: "cancel"`, on
       stdio and on ws; a cancel for an unknown id is an error, not a
       crash; the other session's turn is unperturbed (§5.2.7).
@@ -546,10 +552,17 @@ spawning frame. Measured, three shapes.
       connected conversation cancels exactly as an embedded one. There
       is no Ctrl-C mapping because there is no interactive loop to map
       it in — and the stdlib has no signal surface yet.)*
-- [ ] 11.2.2 HTTP front on the host listener: non-upgrade requests go to
+- [x] 11.2.2 HTTP front on the host listener: non-upgrade requests go to
       cajeta-http `StaticFile` rooted at `--web`; `/ws` to the existing
       `WsUpgrade` path. (Unit 12 replaces this with `HttpServer`/`Router`
       under primavera; keep the seam narrow.)
+      *(`WsConn.readLoop` reads the request head itself (the library's
+      `readRequest` is package-private — 20 lines composed from public
+      `HttpParser`/`WsServerHandshake`/`HttpSerializer`/`WebSocket.forServer`),
+      loops plain requests through `StaticFile.middleware` with a 404
+      fallthrough, and upgrades on the first request carrying Upgrade —
+      any path. `Host.setWebRoot`, `--web DIR` on the host verb, refused
+      at start when not a directory.)*
 - [ ] 11.2.3 Optional per-request diag forwarding through the unit-9
       bridge (`RecordBridge`) to the owning connection.
 - [ ] 11.2.4 `web/` — Vite + React + TypeScript: `protocol/` (the tested

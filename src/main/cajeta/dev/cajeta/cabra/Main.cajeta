@@ -3,6 +3,7 @@ package dev.cajeta.cabra;
 import cajeta.codec.json.JsonLinesWriter;
 import cajeta.io.file.FileReader;
 import cajeta.io.file.FileWriter;
+import cajeta.io.file.Path;
 import cajeta.lang.Integer;
 import cajeta.lang.String;
 import cajeta.lang.System;
@@ -228,6 +229,7 @@ public final class Main {
         String token = "";
         String device = "";
         String kvStore = "";
+        String web = "";
         int64 idleExpiryMs = 600000L;
         boolean verbose = false;
         int32 i = 1;
@@ -263,6 +265,10 @@ public final class Main {
                     && i + 1 < (int32) args.count()) {
                 i = i + 1;
                 kvStore = args[i];
+            } else if (a.equals("--web")
+                    && i + 1 < (int32) args.count()) {
+                i = i + 1;
+                web = args[i];
             } else if (a.equals("--device")
                     && i + 1 < (int32) args.count()) {
                 i = i + 1;
@@ -280,6 +286,16 @@ public final class Main {
             Main.usage();
             return 2;
         }
+        if (!web.equals("")) {
+            // §10.1: a root that is not a directory is a misconfiguration
+            // to refuse at start, not a 404 on every page.
+            Path wp #= Path.of(web);
+            if (!wp.isDir()) {
+                System.stderr.println("cabra: --web " + web
+                    + " is not a directory");
+                return 2;
+            }
+        }
         if (token.equals("")) {
             System.stderr.println("cabra: WARNING - host without "
                 + "--token accepts any loopback connector");
@@ -291,6 +307,9 @@ public final class Main {
         ChatTemplate tpl #= ChatOp.forModel(model, e.tokenizer());
         Host h = heap Host(#e, token, maxConns, maxSeqs, idleExpiryMs);
         h.setContext(ctx);
+        if (!web.equals("")) {
+            h.setWebRoot(web);
+        }
         if (tpl != null) {
             h.setTemplate(#tpl);
         } else {
@@ -300,6 +319,10 @@ public final class Main {
         h.listen(port);
         System.stderr.println("cabra: host on 127.0.0.1:" + h.port
             + " (sessions " + maxSeqs + ", conns " + maxConns + ")");
+        if (!web.equals("")) {
+            System.stderr.println("cabra: web client at http://127.0.0.1:"
+                + h.port + "/ from " + web);
+        }
         h.run();
         h.shutdown();
         if (Main.bridge != null) {
@@ -349,14 +372,15 @@ public final class Main {
         System.stderr.println("       cabra host --model <path> "
             + "[--port N] [--token T] [--ctx N] [--max-seqs N] "
             + "[--max-conns N] [--idle-expiry MS] [--kv-store DIR] "
-            + "[--device <backend>] [--verbose]");
+            + "[--web DIR] [--device <backend>] [--verbose]");
         System.stderr.println("  serve: JSONL on stdin -> JSONL on "
             + "stdout; logs on stderr; EOF or {\"op\":\"shutdown\"} "
             + "exits");
         System.stderr.println("  --connect drives ONE conversation on "
             + "a running host (never starts one); --session resumes");
         System.stderr.println("  host: serves ws clients on loopback; "
-            + "--kv-store makes reconnects warm across sessions");
+            + "--kv-store makes reconnects warm across sessions; "
+            + "--web serves the browser client from DIR on the same port");
         System.stderr.println("  --verbose  engine diagnostics to the "
             + "log at DEBUG");
         return;
