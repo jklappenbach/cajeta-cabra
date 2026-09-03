@@ -92,6 +92,15 @@ jobs:
           sudo apt-get install -y /tmp/cajeta_*_amd64.deb
           cajeta --version || true
 
+      # codec's native zlib archive (native/<platform>/libcajeta_zlib.a) is
+      # a build artifact, gitignored — codec's own CI builds it and bakes it
+      # into the published .cja, but a fresh checkout has none. Build the
+      # host archive so the test exe's --emit=exe link resolves cajeta_zlib
+      # (CAJETA_NATIVE_PATH below points at this native/ dir).
+      - name: Build codec native zlib archive
+        working-directory: cajeta-codec
+        run: ./native/build.sh
+
       - name: Set up Node
         uses: actions/setup-node@v4
         with:
