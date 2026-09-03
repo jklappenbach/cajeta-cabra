@@ -472,3 +472,10 @@ primavera's own spec owns the framework.
   `@Rest` routing and serde, the session store over `HttpServer`) is
   built in primavera, spec'd there, and released; cabra pins the
   release. cabra carries no framework code of its own.
+- **11.7 Enterprise features follow, not lead (Julian, 2026-09-02).**
+  "We'll add to primavera what we need." What cabra wants from primavera
+  is its session model and a security model enterprise users would
+  employ — SSO and the like — layered on §5.5's credential without a
+  protocol change. Order: the simple web client (§10) first, then the
+  primavera assembly (§11.1–11.6), then the enterprise features as
+  their own spec sections, added to primavera as cabra needs them.
