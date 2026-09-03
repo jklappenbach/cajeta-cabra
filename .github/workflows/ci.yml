@@ -115,4 +115,13 @@ jobs:
       - name: Build + test cabra
         working-directory: cabra
         timeout-minutes: 30
+        env:
+          # The test exe links codec's native zlib backend
+          # (libcajeta_zlib). It is not on the runner's ~/.cajeta/native,
+          # but the codec checkout carries it at native/<platform>/; point
+          # the linker's search dir there. (The shared lib-release
+          # workflow gets this for free when its `cajeta build` extracts
+          # codec's native out of the Olla .cja; run-tests.sh emits an exe
+          # and needs it explicitly.)
+          CAJETA_NATIVE_PATH: ${{ github.workspace }}/cajeta-codec/native
         run: ./run-tests.sh
