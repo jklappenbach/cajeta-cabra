@@ -6,6 +6,7 @@ import cajeta.io.file.FileWriter;
 import cajeta.lang.Optional;
 import cajeta.lang.String;
 import cajeta.time.Clock;
+import dev.cajeta.llm.Diag;
 import dev.cajeta.llm.LlmEngine;
 import dev.cajeta.llm.chat.ChatTemplate;
 import dev.cajeta.llm.gen.SampleParams;
@@ -13,6 +14,8 @@ import dev.cajeta.llm.gen.TokenSink;
 import dev.cajeta.llm.sched.Request;
 import dev.cajeta.cabra.ChatOp;
 import dev.cajeta.cabra.Main;
+import dev.cajeta.cabra.diag.DiagQueue;
+import dev.cajeta.cabra.diag.DiagnosticBridge;
 import dev.cajeta.cabra.io.LineReader;
 import dev.cajeta.cabra.io.Utf8Chunker;
 import dev.cajeta.cabra.proto.Protocol;
@@ -71,6 +74,11 @@ public final class Serve implements TokenSink {
     int64[] trT0Ns;
     int64[] trFirstNs;
     boolean[] trOpen;          // slot holds an unfinished request
+    boolean[] trDiag;          // §10.9: this request asked for records
+    DiagQueue diagQ;           // borrow; null = no forwarding
+    DiagnosticBridge diagBridge; // borrow
+    boolean diagAlways;
+    int32 diagWanted;
 
     public Serve(#LlmEngine engine, #FileWriter sink,
             String modelPath, int32 ctx) {
@@ -89,6 +97,11 @@ public final class Serve implements TokenSink {
         this.trT0Ns = heap int64[this.cap];
         this.trFirstNs = heap int64[this.cap];
         this.trOpen = heap boolean[this.cap];
+        this.trDiag = heap boolean[this.cap];
+        this.diagQ = null;
+        this.diagBridge = null;
+        this.diagAlways = false;
+        this.diagWanted = 0;
         this.engine.setSink(this);
     }
 
@@ -107,6 +120,70 @@ public final class Serve implements TokenSink {
      *  once the engine is up. */
     public void setState(String s) {
         this.state = s;
+        return;
+    }
+
+    /** §10.9: forward a request's records to the parent as
+     *  `{"id":N,"diag":{...}}` lines when it asked (`"diag":true`).
+     *  `always` = the bridge is registered for the process's life
+     *  (--verbose); otherwise it is registered only while some
+     *  in-flight request wants records. */
+    public void setDiag(DiagQueue q, DiagnosticBridge b, boolean always) {
+        this.diagQ = q;
+        this.diagBridge = b;
+        this.diagAlways = always;
+        return;
+    }
+
+    void diagArm() {
+        if (this.diagQ == null) {
+            return;
+        }
+        if (this.diagWanted == 0) {
+            this.diagQ.arm();
+            if (!this.diagAlways) {
+                Diag.register(this.diagBridge);
+            }
+        }
+        this.diagWanted = this.diagWanted + 1;
+        return;
+    }
+
+    void diagDisarm() {
+        if (this.diagQ == null || this.diagWanted == 0) {
+            return;
+        }
+        this.diagWanted = this.diagWanted - 1;
+        if (this.diagWanted == 0) {
+            this.diagQ.disarm();
+            if (!this.diagAlways) {
+                Diag.register(null);
+            }
+        }
+        return;
+    }
+
+    /** After a step, before the reap: the step's records to the
+     *  requests that asked, while they are still mapped. */
+    void forwardDiag() {
+        if (this.diagQ == null || this.diagWanted == 0) {
+            return;
+        }
+        int32 n = this.diagQ.take();
+        int32 k = 0;
+        while (k < n) {
+            int64 rid = this.diagQ.outSession(k);
+            int32 i = 0;
+            while (i < this.cap) {
+                if (this.trOpen[i] && this.trDiag[i]
+                        && (int64) this.trRid[i] == rid) {
+                    this.diagQ.emitLine(this.out, this.trId[i], k);
+                    break;
+                }
+                i = i + 1;
+            }
+            k = k + 1;
+        }
         return;
     }
 
@@ -129,6 +206,7 @@ public final class Serve implements TokenSink {
         this.trT0Ns = heap int64[n];
         this.trFirstNs = heap int64[n];
         this.trOpen = heap boolean[n];
+        this.trDiag = heap boolean[n];
         return;
     }
 
@@ -269,6 +347,10 @@ public final class Serve implements TokenSink {
         this.trT0Ns[slot] = Clock.nanoTime();
         this.trFirstNs[slot] = 0L;
         this.trOpen[slot] = true;
+        this.trDiag[slot] = r.diag;
+        if (r.diag) {
+            this.diagArm();
+        }
         this.live = this.live + 1;
         return;
     }
@@ -298,6 +380,7 @@ public final class Serve implements TokenSink {
                 this.failAllOpen("generation failed: " + t.getMessage());
                 return completed;
             }
+            this.forwardDiag();
             completed = completed + this.reapFinished();
             if (!more) {
                 break;
@@ -335,6 +418,7 @@ public final class Serve implements TokenSink {
             this.failAllOpen("generation failed: " + t.getMessage());
             return completed;
         }
+        this.forwardDiag();
         completed = this.reapFinished();
         if (completed > 0) {
             this.idleSteps = 0;
@@ -475,6 +559,10 @@ public final class Serve implements TokenSink {
             (int64) this.trPromptLen[slot], (int64) q.generatedCount(),
             pMs, dMs);
         this.trOpen[slot] = false;
+        if (this.trDiag[slot]) {
+            this.trDiag[slot] = false;
+            this.diagDisarm();
+        }
         this.live = this.live - 1;
         return;
     }
@@ -487,6 +575,10 @@ public final class Serve implements TokenSink {
             if (this.trOpen[i]) {
                 Protocol.emitError(this.out, this.trId[i], true, message);
                 this.trOpen[i] = false;
+                if (this.trDiag[i]) {
+                    this.trDiag[i] = false;
+                    this.diagDisarm();
+                }
                 this.live = this.live - 1;
             }
             i = i + 1;

@@ -39,6 +39,7 @@ public final class Req {
     // ProtocolTest: n=256, temp=0 (deterministic), top_k=40, top_p=0.95,
     // repeat_penalty=1.0, seed=0.
     public int32 n;
+    public boolean diag;       // §10.9: forward this request's records
     public float32 temp;
     public int32 topK;
     public float32 topP;
@@ -70,5 +71,6 @@ public final class Req {
         this.repeatPenalty = 1.0f;
         this.seed = 0L;
         this.stops = null;
+        this.diag = false;
     }
 }

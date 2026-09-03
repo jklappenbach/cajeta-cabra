@@ -537,9 +537,14 @@ spawning frame. Measured, three shapes.
       open; chunk/done/error sequencing; reconnect resumes by session id;
       `session_gone` → open + resubmit with a notice; cancel; several
       sessions on one socket.
-- [ ] 11.1.5 With `"diag":true` a session's records arrive as `diag`
+- [x] 11.1.5 With `"diag":true` a session's records arrive as `diag`
       lines on that request; without it none do and nothing is formatted
       (the does-NOT-fire half).
+      *(DiagForwardTest: stdio — the asking request's lines all precede
+      its done line, the non-asking neighbour gets none, and while
+      nobody asks `Diag.builtCount` is FLAT (measured at the engine, not
+      inferred from silence) with `Diag.on()` false again after; ws —
+      the asking connection gets them, none after done.)*
 
 ### 11.2 Coding
 - [x] 11.2.1 `cancel` op: `Protocol`, `ServeCore`, `Serve` (stdio),
@@ -563,8 +568,17 @@ spawning frame. Measured, three shapes.
       fallthrough, and upgrades on the first request carrying Upgrade —
       any path. `Host.setWebRoot`, `--web DIR` on the host verb, refused
       at start when not a directory.)*
-- [ ] 11.2.3 Optional per-request diag forwarding through the unit-9
+- [x] 11.2.3 Optional per-request diag forwarding through the unit-9
       bridge (`RecordBridge`) to the owning connection.
+      *(`DiagQueue`: the bridge pushes RAW fields from the engine thread
+      while armed; the transport drains on its own thread after each
+      step and BEFORE the reap, rendering with the bridge's own
+      `render` — so a client reads exactly the log's line, and the
+      request is still mapped. Arming registers the bridge with the
+      engine on demand (0→1 in-flight askers) and unregisters at 1→0
+      unless --verbose holds it. Wire: `{"id":N,"diag":{"cat","name",
+      "text","v":[6]}}` on both transports. `Main` builds the bridge in
+      every mode now; --verbose only decides logging + always-on.)*
 - [ ] 11.2.4 `web/` — Vite + React + TypeScript: `protocol/` (the tested
       state machine), `ui/` (conversation list, transcript with streaming
       + markdown-on-complete, sampling panel, token prompt, health badge,

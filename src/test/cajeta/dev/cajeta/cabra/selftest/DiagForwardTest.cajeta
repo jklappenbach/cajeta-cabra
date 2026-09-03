@@ -1,0 +1,221 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.collection.ArrayList;
+import cajeta.concurrent.Tasks;
+import cajeta.io.file.File;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.llm.Diag;
+import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.logging.Level;
+import dev.cajeta.logging.Log;
+import dev.cajeta.logging.CapturingAppender;
+import dev.cajeta.logging.Logger;
+import dev.cajeta.cabra.diag.DiagQueue;
+import dev.cajeta.cabra.diag.DiagnosticBridge;
+import dev.cajeta.cabra.stdio.Serve;
+import dev.cajeta.cabra.ws.Host;
+
+/**
+ * Plan 11.1.5 (spec §10.9) — a request that says `"diag":true` gets
+ * its session's records back as `{"id":N,"diag":{...}}` lines, every
+ * one of them BEFORE its done line (the mapping is still live and the
+ * client sees the turn's diagnostics with the turn); a request that
+ * does not says nothing and costs nothing — the engine builds no
+ * record at all while nobody asks (Diag.builtCount is flat), which is
+ * the "nothing is formatted when off" half measured at the source.
+ */
+public class DiagForwardTest {
+
+    public DiagForwardTest() { return; }
+
+    static #String genLine(int64 id, String prompt, boolean diag) {
+        String d = diag ? ",\"diag\":true" : "";
+        String s = "{\"op\":\"generate\",\"id\":" + id + ",\"prompt\":\""
+            + prompt + "\",\"n\":4,\"temp\":0" + d + "}";
+        return #s;
+    }
+
+    /** Diag lines for `id`, in file order; `doneAt` receives the index
+     *  of the done line (or -1). */
+    static int32 diagCount(ArrayList<String> lines, int64 id,
+            int32[] lastDiagIdx, int32[] doneIdx) {
+        int32 n = 0;
+        lastDiagIdx[0] = 0 - 1;
+        doneIdx[0] = 0 - 1;
+        int32 i = 0;
+        while (i < (int32) lines.count()) {
+            JsonValue v #= Json.parse(lines.get(i));
+            if (v.kind() == JsonValue.OBJECT) {
+                JsonObject o = v.object();
+                if (o.containsKey("id") && o.get("id").kind() == JsonValue.NUMBER
+                        && o.get("id").asInt64() == id) {
+                    if (o.containsKey("diag")) {
+                        JsonObject d = o.get("diag").object();
+                        Assert.isTrue(d.containsKey("cat"));
+                        Assert.isTrue(d.containsKey("text"));
+                        n = n + 1;
+                        lastDiagIdx[0] = i;
+                    } else if (o.containsKey("done")) {
+                        doneIdx[0] = i;
+                    }
+                }
+            }
+            i = i + 1;
+        }
+        return n;
+    }
+
+    /** stdio: fires for the asking request, silent for the other, and
+     *  the engine is quiet while nobody asks. */
+    @Test
+    public void diagLinesFollowOnlyTheRequestThatAsked() {
+        CapturingAppender cap #= heap CapturingAppender();
+        Logger log #= Log.capturing("cabra.engine", Level.DEBUG, #cap);
+        DiagnosticBridge b #= heap DiagnosticBridge(#log);
+        b.setLogging(false);
+        DiagnosticBridge.start(b);
+        DiagQueue q = heap DiagQueue();
+        b.setQueue(q);
+
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        String path = "tmp/df-stdio.jsonl";
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, ConcurrencyTest.TOY, 128);
+        s.setCapacity(2);
+        s.setDiag(q, b, false);
+
+        // Nobody asks: the engine builds nothing.
+        int64 built0 = Diag.builtCount();
+        String g2 #= DiagForwardTest.genLine(2L, ConcurrencyTest.PROMPT_B, false);
+        s.handleLine(g2);
+        s.drive();
+        Assert.equals(built0, Diag.builtCount());
+        Assert.isFalse(Diag.on());
+
+        // One asks, one does not, together.
+        String g1 #= DiagForwardTest.genLine(1L, ConcurrencyTest.PROMPT_A, true);
+        String g3 #= DiagForwardTest.genLine(3L, ConcurrencyTest.PROMPT_B, false);
+        s.handleLine(g1);
+        s.handleLine(g3);
+        s.drive();
+        Assert.isTrue(Diag.builtCount() > built0);
+        // Demand went back to zero: the engine is off again.
+        Assert.isFalse(Diag.on());
+        s.close();
+        b.close();
+
+        ArrayList<String> lines #= ConcurrencyTest.linesOf(path);
+        int32[] last = heap int32[1];
+        int32[] done = heap int32[1];
+        int32 n1 = DiagForwardTest.diagCount(lines, 1L, last, done);
+        Assert.isTrue(n1 > 0);
+        Assert.isTrue(done[0] >= 0);
+        Assert.isTrue(last[0] < done[0]);
+        int32 n2 = DiagForwardTest.diagCount(lines, 2L, last, done);
+        Assert.equals(0L, (int64) n2);
+        int32 n3 = DiagForwardTest.diagCount(lines, 3L, last, done);
+        Assert.equals(0L, (int64) n3);
+        String f1 #= ConcurrencyTest.finishFor(lines, 1L);
+        Assert.equals("budget", f1);
+    }
+
+    static class DiagRun {
+        public int32 port;
+        public int32 diags;
+        public int32 diagsAfterDone;
+        public String finish;
+        public DiagRun() {
+            this.port = 0;
+            this.diags = 0;
+            this.diagsAfterDone = 0;
+            this.finish = "";
+        }
+    }
+
+    static async int32 runAsker(DiagRun r) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, r.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(r.port, rd, wr);
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        ws.send("{\"op\":\"open\",\"id\":4}");
+        String op #= HostTest.recvText(ws);
+        JsonValue ov #= Json.parse(op);
+        int64 sid = ov.object().get("session").asInt64();
+        ws.send("{\"op\":\"generate\",\"id\":4,\"session\":" + sid
+            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
+            + "\",\"n\":4,\"temp\":0,\"diag\":true}");
+        boolean done = false;
+        while (true) {
+            String line #= HostTest.recvText(ws);
+            if (line == null) {
+                break;
+            }
+            JsonValue v #= Json.parse(line);
+            JsonObject o = v.object();
+            if (o.containsKey("diag")) {
+                r.diags = r.diags + 1;
+                if (done) {
+                    r.diagsAfterDone = r.diagsAfterDone + 1;
+                }
+            } else if (o.containsKey("done")) {
+                String f #= o.get("finish").asString();
+                r.finish = f;
+                done = true;
+                // Anything still queued for us would arrive now; give
+                // it a moment so a late line is COUNTED, not missed.
+                Tasks.sleepMillis(100L);
+                break;
+            }
+        }
+        ws.send("{\"op\":\"shutdown\"}");
+        Tasks.sleepMillis(200L);
+        sock.close();
+        return 0;
+    }
+
+    /** ws: the asking connection gets its diag lines, all before done. */
+    @Test
+    public void diagLinesReachTheWsClientThatAsked() {
+        CapturingAppender cap #= heap CapturingAppender();
+        Logger log #= Log.capturing("cabra.engine", Level.DEBUG, #cap);
+        DiagnosticBridge b #= heap DiagnosticBridge(#log);
+        b.setLogging(false);
+        DiagnosticBridge.start(b);
+        DiagQueue q = heap DiagQueue();
+        b.setQueue(q);
+
+        LlmEngine e #= ConcurrencyTest.engine(1);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 2, 60000L);
+        h.setDiag(q, b, false);
+        h.listen(0);
+        DiagRun r = heap DiagRun();
+        r.port = h.port;
+        scope {
+            spawn runAsker(r);
+            h.run();
+            h.shutdown();
+        }
+        b.close();
+        Assert.equals("budget", r.finish);
+        Assert.isTrue(r.diags > 0);
+        Assert.equals(0L, (int64) r.diagsAfterDone);
+        Assert.isFalse(Diag.on());
+    }
+}

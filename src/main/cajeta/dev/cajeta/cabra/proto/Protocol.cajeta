@@ -101,6 +101,10 @@ public final class Protocol {
     }
 
     static void readSampling(JsonObject o, Req r) {
+        JsonValue dv = o.get("diag");
+        if (dv != null && dv.kind() == JsonValue.BOOLEAN) {
+            r.diag = dv.asBoolean();
+        }
         JsonValue nv = o.get("n");
         if (nv != null && nv.kind() == JsonValue.NUMBER) {
             r.n = nv.asInt32();

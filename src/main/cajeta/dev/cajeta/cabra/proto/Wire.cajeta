@@ -94,6 +94,12 @@ public final class Wire {
         return #= "{\"id\":" + id + ",\"chunk\":\"" + e + "\"}";
     }
 
+    /** §10.9: one forwarded record; `body` is the diag object, already
+     *  JSON (DiagQueue.outJson). */
+    public static #String diag(int64 id, String body) {
+        return #= "{\"id\":" + id + ",\"diag\":" + body + "}";
+    }
+
     public static #String done(int64 id, String finish) {
         return #= "{\"id\":" + id + ",\"done\":true,\"finish\":\""
             + finish + "\"}";

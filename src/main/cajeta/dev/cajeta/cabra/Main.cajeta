@@ -14,6 +14,7 @@ import dev.cajeta.llm.chat.ChatTemplate;
 import dev.cajeta.logging.Level;
 import dev.cajeta.logging.Log;
 import dev.cajeta.logging.Logger;
+import dev.cajeta.cabra.diag.DiagQueue;
 import dev.cajeta.cabra.diag.DiagnosticBridge;
 import dev.cajeta.cabra.io.LineReader;
 import dev.cajeta.cabra.stdio.Serve;
@@ -39,6 +40,8 @@ public final class Main {
     // Task static is what keeps the drainer fiber from being joined the
     // moment it is spawned.
     static DiagnosticBridge bridge;
+    // §10.9: the forwarding queue between the bridge and the transport.
+    static DiagQueue diagQueue;
 
     /**
      * Honor `--verbose`: consume the engine's diagnostic RECORDS (spec
@@ -49,16 +52,26 @@ public final class Main {
      * stdout is protocol-pure and stderr is not a dumping ground.
      */
     static void applyDiag(boolean verbose) {
+        // Log.at, NOT Log.console: `console` builds its OWN
+        // ConsoleAppender per call, so the engine's diagnostics would
+        // run as a SECOND stream beside cabra's own logs and would
+        // stop following the moment a file sink is configured. `at`
+        // borrows the process's DI encoder+appender, so both
+        // aggregate into one stream (Julian, 2026-08-30).
+        //
+        // The bridge now exists in every mode, because a client may ask
+        // for its records (§10.9); what --verbose decides is whether
+        // they are ALSO logged, and whether the engine is observed all
+        // the time or only while some request asks (the transport
+        // registers the bridge on demand otherwise, so the unobserved
+        // engine builds nothing).
+        Logger log #= Log.at("cabra.engine", Level.DEBUG);
+        Main.bridge #= heap DiagnosticBridge(#log);
+        Main.bridge.setLogging(verbose);
+        Main.diagQueue = heap DiagQueue();
+        Main.bridge.setQueue(Main.diagQueue);
+        DiagnosticBridge.start(Main.bridge);
         if (verbose) {
-            // Log.at, NOT Log.console: `console` builds its OWN
-            // ConsoleAppender per call, so the engine's diagnostics would
-            // run as a SECOND stream beside cabra's own logs and would
-            // stop following the moment a file sink is configured. `at`
-            // borrows the process's DI encoder+appender, so both
-            // aggregate into one stream (Julian, 2026-08-30).
-            Logger log #= Log.at("cabra.engine", Level.DEBUG);
-            Main.bridge #= heap DiagnosticBridge(#log);
-            DiagnosticBridge.start(Main.bridge);
             Diag.register(Main.bridge);
         }
         return;
@@ -191,6 +204,7 @@ public final class Main {
         ChatTemplate tpl #= ChatOp.forModel(model, e.tokenizer());
         Serve s = heap Serve(#e, #fw, model, ctx);
         s.setCapacity(maxSeqs);
+        s.setDiag(Main.diagQueue, Main.bridge, verbose);
         if (tpl != null) {
             s.setTemplate(#tpl);
         } else {
@@ -307,6 +321,7 @@ public final class Main {
         ChatTemplate tpl #= ChatOp.forModel(model, e.tokenizer());
         Host h = heap Host(#e, token, maxConns, maxSeqs, idleExpiryMs);
         h.setContext(ctx);
+        h.setDiag(Main.diagQueue, Main.bridge, verbose);
         if (!web.equals("")) {
             h.setWebRoot(web);
         }

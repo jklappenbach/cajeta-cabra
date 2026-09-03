@@ -1,0 +1,239 @@
+package dev.cajeta.cabra.diag;
+
+import cajeta.codec.json.JsonLinesWriter;
+import cajeta.collection.ArrayList;
+import cajeta.concurrent.Lock;
+import cajeta.concurrent.LockGuard;
+import cajeta.lang.String;
+
+/**
+ * Spec §10.9 (plan 11.2.3): the hand-off between the engine's record
+ * callback and the transport that forwards a session's records to the
+ * client that asked for them.
+ *
+ * The bridge pushes RAW fields here from the engine's thread — no
+ * rendering, the same discipline as its own ring (§8.2.1) — and only
+ * while `armed()`, which the transport raises for as long as at least
+ * one in-flight request said `"diag":true`. The transport drains on
+ * ITS thread after each scheduler step and before it reaps, so every
+ * record a turn produced is rendered and sent while the request is
+ * still mapped to its connection, ahead of the done line.
+ *
+ * Bounded: past CAP the newest record is shed and counted, never
+ * blocked on — a slow client must not become token latency.
+ */
+public final class DiagQueue {
+
+    static final int32 CAP = 1024;
+
+    Lock mu;
+    int32 armed;                // in-flight requests that asked
+    ArrayList<String> cats;     // CAP slots, reused
+    ArrayList<String> names;
+    int64[] vals;               // [i*8+0..5] v0..v5, [i*8+6] session
+    int32 head;
+    int32 tail;
+    int32 queued;
+    int64 shed;
+
+    // The drained batch, owned by the draining thread between take()
+    // and the next take().
+    ArrayList<String> outCats;
+    ArrayList<String> outNames;
+    int64[] outVals;
+    int32 outCount;
+
+    public DiagQueue() {
+        this.mu = heap Lock();
+        this.armed = 0;
+        this.cats = heap ArrayList<String>();
+        this.names = heap ArrayList<String>();
+        this.outCats = heap ArrayList<String>();
+        this.outNames = heap ArrayList<String>();
+        int32 i = 0;
+        while (i < DiagQueue.CAP) {
+            String c0 #= DiagQueue.cp("");
+            this.cats.add(#c0);
+            String n0 #= DiagQueue.cp("");
+            this.names.add(#n0);
+            String c1 #= DiagQueue.cp("");
+            this.outCats.add(#c1);
+            String n1 #= DiagQueue.cp("");
+            this.outNames.add(#n1);
+            i = i + 1;
+        }
+        this.vals #= heap int64[(int64) DiagQueue.CAP * 8L];
+        this.outVals #= heap int64[(int64) DiagQueue.CAP * 8L];
+        this.head = 0;
+        this.tail = 0;
+        this.queued = 0;
+        this.shed = 0L;
+        this.outCount = 0;
+        return;
+    }
+
+    static #String cp(String s) {
+        int8[] b #= s.toBytes();
+        String c = heap String(#b, s.byteLength());
+        return #= c;
+    }
+
+    /** Whether any in-flight request wants records. Read on the
+     *  engine's thread without the lock: a stale answer only delays
+     *  the first or last record of a turn by one step. */
+    public boolean armed() {
+        return this.armed > 0;
+    }
+
+    public void arm() {
+        LockGuard g #= this.mu.acquire();
+        this.armed = this.armed + 1;
+        return;
+    }
+
+    public void disarm() {
+        LockGuard g #= this.mu.acquire();
+        if (this.armed > 0) {
+            this.armed = this.armed - 1;
+        }
+        return;
+    }
+
+    public int64 shedCount() {
+        return this.shed;
+    }
+
+    /** Engine thread: copy the fields, return. */
+    public void push(String cat, String name, int64 session, int64 v0,
+            int64 v1, int64 v2, int64 v3, int64 v4, int64 v5) {
+        LockGuard g #= this.mu.acquire();
+        if (this.queued >= DiagQueue.CAP) {
+            this.shed = this.shed + 1L;
+            return;
+        }
+        int32 s = this.head;
+        String c #= DiagQueue.cp(cat);
+        this.cats.set(s, #c);
+        String n #= DiagQueue.cp(name != null ? name : "-");
+        this.names.set(s, #n);
+        int64 b = (int64) s * 8L;
+        this.vals[b] = v0;
+        this.vals[b + 1L] = v1;
+        this.vals[b + 2L] = v2;
+        this.vals[b + 3L] = v3;
+        this.vals[b + 4L] = v4;
+        this.vals[b + 5L] = v5;
+        this.vals[b + 6L] = session;
+        this.head = (this.head + 1) % DiagQueue.CAP;
+        this.queued = this.queued + 1;
+        return;
+    }
+
+    /** Transport thread: move everything queued into the out batch and
+     *  return its count; read it with outSession/outLine. */
+    public int32 take() {
+        LockGuard g #= this.mu.acquire();
+        int32 n = 0;
+        while (this.queued > 0) {
+            int32 s = this.tail;
+            String c #= DiagQueue.cp(this.cats.get(s));
+            this.outCats.set(n, #c);
+            String nm #= DiagQueue.cp(this.names.get(s));
+            this.outNames.set(n, #nm);
+            int64 b = (int64) s * 8L;
+            int64 ob = (int64) n * 8L;
+            int32 k = 0;
+            while (k < 7) {
+                this.outVals[ob + (int64) k] = this.vals[b + (int64) k];
+                k = k + 1;
+            }
+            this.tail = (this.tail + 1) % DiagQueue.CAP;
+            this.queued = this.queued - 1;
+            n = n + 1;
+        }
+        this.outCount = n;
+        return n;
+    }
+
+    public int64 outSession(int32 i) {
+        return this.outVals[(int64) i * 8L + 6L];
+    }
+
+    public String outCat(int32 i) {
+        return this.outCats.get(i);
+    }
+
+    /** The record `i` of the last batch as the `diag` object's body:
+     *  category, name, the bridge's one-line rendering, and the raw
+     *  values — a client can show the text or read the numbers. */
+    public #String outJson(int32 i) {
+        int64 b = (int64) i * 8L;
+        String cat = this.outCats.get(i);
+        String nm = this.outNames.get(i);
+        String text #= DiagnosticBridge.render(cat, nm, this.outVals[b + 6L],
+            this.outVals[b], this.outVals[b + 1L], this.outVals[b + 2L],
+            this.outVals[b + 3L], this.outVals[b + 4L], this.outVals[b + 5L]);
+        String ec #= DiagQueue.esc(cat);
+        String en #= DiagQueue.esc(nm);
+        String et #= DiagQueue.esc(text);
+        return #= "{\"cat\":\"" + ec + "\",\"name\":\"" + en
+            + "\",\"text\":\"" + et + "\",\"v\":[" + this.outVals[b] + ","
+            + this.outVals[b + 1L] + "," + this.outVals[b + 2L] + ","
+            + this.outVals[b + 3L] + "," + this.outVals[b + 4L] + ","
+            + this.outVals[b + 5L] + "]}";
+    }
+
+    /** The stdio form of outJson: the same object through the codec's
+     *  writer, so escaping is the codec's (Protocol's rule). */
+    public void emitLine(JsonLinesWriter out, int64 id, int32 i) {
+        int64 b = (int64) i * 8L;
+        String cat = this.outCats.get(i);
+        String nm = this.outNames.get(i);
+        String text #= DiagnosticBridge.render(cat, nm, this.outVals[b + 6L],
+            this.outVals[b], this.outVals[b + 1L], this.outVals[b + 2L],
+            this.outVals[b + 3L], this.outVals[b + 4L], this.outVals[b + 5L]);
+        out.beginObject()
+            .key("id").writeNumber(id)
+            .key("diag").beginObject()
+                .key("cat").writeString(cat)
+                .key("name").writeString(nm)
+                .key("text").writeString(text)
+                .key("v").beginArray()
+                    .writeNumber(this.outVals[b])
+                    .writeNumber(this.outVals[b + 1L])
+                    .writeNumber(this.outVals[b + 2L])
+                    .writeNumber(this.outVals[b + 3L])
+                    .writeNumber(this.outVals[b + 4L])
+                    .writeNumber(this.outVals[b + 5L])
+                .endArray()
+            .endObject()
+            .endObject().endLine();
+        out.flush();
+        return;
+    }
+
+    /** Minimal JSON string escaping for the bridge's ASCII renderings:
+     *  quotes and backslashes; control characters never occur there. */
+    static #String esc(String s) {
+        if (!s.contains("\"") && !s.contains("\\")) {
+            return #DiagQueue.cp(s);
+        }
+        int8[] in #= s.toBytes();
+        int32 n = (int32) in.count();
+        int8[] out #= heap int8[n * 2];
+        int32 o = 0;
+        int32 i = 0;
+        while (i < n) {
+            int8 c = in[i];
+            if (c == (int8) 34 || c == (int8) 92) {
+                out[o] = (int8) 92;
+                o = o + 1;
+            }
+            out[o] = c;
+            o = o + 1;
+            i = i + 1;
+        }
+        String r = heap String(#out, o);
+        return #= r;
+    }
+}

@@ -59,6 +59,10 @@ public final class DiagnosticBridge implements DiagCallback {
     // temporary drops. `spawn` only accepts an UNQUALIFIED same-class
     // static (CAJETA_ERROR_ASYNC_R3A), which is why `start` lives here.
     Task<int32> drainer;
+    // §10.9: where records ALSO go, raw, while a client has asked for
+    // them (borrow; the transport owns it and drains it). Optional.
+    DiagQueue queue;
+    boolean logging;    // false = forward only, never render for the log
 
     public DiagnosticBridge(#Logger l) {
         this.log #= l;
@@ -75,6 +79,8 @@ public final class DiagnosticBridge implements DiagCallback {
             i = i + 1;
         }
         this.vals #= heap int64[(int64) DiagnosticBridge.CAP * 8L];
+        this.queue = null;
+        this.logging = true;
         this.head = 0;
         this.tail = 0;
         this.queued = 0;
@@ -110,8 +116,28 @@ public final class DiagnosticBridge implements DiagCallback {
         return #= c;
     }
 
+    /** Attach the forwarding queue (§10.9). The bridge borrows it. */
+    public void setQueue(DiagQueue q) {
+        this.queue = q;
+        return;
+    }
+
+    /** Whether records are rendered into the log at all. A host that
+     *  is not `--verbose` keeps the bridge only to forward. */
+    public void setLogging(boolean on) {
+        this.logging = on;
+        return;
+    }
+
     /** Engine thread: copy, signal, return (§8.2.1). */
     public void onRecord(DiagRecord r) {
+        if (this.queue != null && this.queue.armed()) {
+            this.queue.push(r.category, r.name, (int64) r.session, r.v0,
+                r.v1, r.v2, r.v3, r.v4, r.v5);
+        }
+        if (!this.logging) {
+            return;
+        }
         {
             LockGuard g #= this.mu.acquire();
             if (this.queued >= DiagnosticBridge.CAP) {
@@ -202,39 +228,46 @@ public final class DiagnosticBridge implements DiagCallback {
      *  9.3.1). */
     void publish(String cat, String nm, int64 sess, int64 v0, int64 v1,
             int64 v2, int64 v3, int64 v4, int64 v5) {
+        String line #= DiagnosticBridge.render(cat, nm, sess, v0, v1, v2,
+            v3, v4, v5);
         if (cat.equals("launch-failure")) {
-            this.log.error("LAUNCH FAILURE: " + v0 + " dispatch(es) "
-                + "never ran in step " + v1 + " (session " + sess + ")");
+            this.log.error(line);
             return;
+        }
+        this.log.debug(line);
+        return;
+    }
+
+    /** One record as one line — shared by the log and by the §10.9
+     *  forwarder, so a client reads exactly what the log says. */
+    public static #String render(String cat, String nm, int64 sess,
+            int64 v0, int64 v1, int64 v2, int64 v3, int64 v4, int64 v5) {
+        if (cat.equals("launch-failure")) {
+            return #= "LAUNCH FAILURE: " + v0 + " dispatch(es) "
+                + "never ran in step " + v1 + " (session " + sess + ")";
         }
         if (cat.equals("sched-step")) {
-            this.log.debug("sched step=" + v0 + " req=" + sess
+            return #= "sched step=" + v0 + " req=" + sess
                 + " slot=" + v1 + " cachedLen=" + v2 + " n=" + v3
-                + " totalLen=" + v4 + " cacheLen=" + v5);
-            return;
+                + " totalLen=" + v4 + " cacheLen=" + v5;
         }
         if (cat.equals("sched-admit")) {
-            this.log.debug("sched admit req=" + sess + " -> slot=" + v0
-                + " (" + nm + ") cacheLen=" + v1);
-            return;
+            return #= "sched admit req=" + sess + " -> slot=" + v0
+                + " (" + nm + ") cacheLen=" + v1;
         }
         if (cat.equals("batch-route")) {
-            this.log.debug("batch-route: " + nm + " out=" + v0
-                + " in=" + v1);
-            return;
+            return #= "batch-route: " + nm + " out=" + v0 + " in=" + v1;
         }
         if (cat.equals("prefill-mode")) {
-            this.log.debug("prefill: " + nm + " projections rows=" + v0);
-            return;
+            return #= "prefill: " + nm + " projections rows=" + v0;
         }
         if (cat.equals("expert-cache")) {
             // moe-expert-cache spec 8.1 / 3.3.1: one MoE layer call's
             // resident/T0 split — the record cabra renders the cache
             // behavior from.
-            this.log.debug("expert-cache: " + nm + " layer=" + v0
+            return #= "expert-cache: " + nm + " layer=" + v0
                 + " hits=" + v1 + " t0=" + v2 + " admits=" + v3
-                + " admitB=" + v4 + " residentB=" + v5);
-            return;
+                + " admitB=" + v4 + " residentB=" + v5;
         }
         if (cat.equals("route")) {
             // cajeta-llm unit 30 (spec 15.20): a request's routing, at
@@ -245,27 +278,23 @@ public final class DiagnosticBridge implements DiagCallback {
             // host can see one conversation's expert affinity — the
             // seam expert-affinity scheduling builds on.
             if (nm.equals("layer")) {
-                this.log.debug("route: req=" + sess + " layer=" + v0
+                return #= "route: req=" + sess + " layer=" + v0
                     + " tokens=" + v1 + " distinct=" + v2 + " k90=" + v3
-                    + " top=" + v4 + " topHits=" + v5);
-            } else {
-                this.log.debug("route: req=" + sess + " tokens=" + v0
-                    + " layers=" + v1 + " experts=" + v2
-                    + " distinctPairs=" + v3 + " meanK90=" + v4
-                    + " hits=" + v5);
+                    + " top=" + v4 + " topHits=" + v5;
             }
-            return;
+            return #= "route: req=" + sess + " tokens=" + v0
+                + " layers=" + v1 + " experts=" + v2
+                + " distinctPairs=" + v3 + " meanK90=" + v4
+                + " hits=" + v5;
         }
         if (cat.equals("kv-ceiling")) {
-            this.log.debug("device kv ceiling: " + (v0 / 1048576L)
-                + " MiB (" + v1 + " slots x " + v2 + " ctx)");
-            return;
+            return #= "device kv ceiling: " + (v0 / 1048576L)
+                + " MiB (" + v1 + " slots x " + v2 + " ctx)";
         }
         // Unknown categories render generically — a new engine record
         // must not vanish because cabra lagged.
-        this.log.debug(cat + " s=" + sess + " " + nm + " " + v0 + " "
-            + v1 + " " + v2 + " " + v3 + " " + v4 + " " + v5);
-        return;
+        return #= cat + " s=" + sess + " " + nm + " " + v0 + " "
+            + v1 + " " + v2 + " " + v3 + " " + v4 + " " + v5;
     }
 
     /** Block (politely) until everything enqueued so far is published.
