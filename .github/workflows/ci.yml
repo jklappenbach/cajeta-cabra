@@ -1,0 +1,101 @@
+# CI gate for cabra (spec §10 / cabra-plan 11.2.5).
+#
+# cabra is the ecosystem's first APPLICATION, and it cannot use the shared
+# reusable workflow (jklappenbach/cajeta/.github/workflows/lib-release.yml)
+# the libraries use: that workflow resolves a repo's dependencies from Olla,
+# and cabra's do not all live there —
+#   - dev.cajeta.llm  is not published to Olla at all (the engine is not a
+#     library), and
+#   - the http / logging PINS in cajeta.json (0.1.4 / 0.7.0) are newer than
+#     what Olla carries.
+# So this gate clones those siblings and lets run-tests.sh build them, exactly
+# as a local checkout does. It is gating ONLY — build + full suite on every
+# main push, NO tag path and NO publish (the app-release that packages the exe
+# + web/dist rides cabra unit 12, where the primavera dependency lands too).
+#
+# When llm/http/logging are eventually published to Olla at cabra's pins, most
+# of this collapses back into the shared lib-release workflow.
+#
+# No pull_request trigger by design — this repo lands changes by pushing
+# straight to main (the fleet convention), so main-push CI is the only thing
+# between a bad commit and the next tag.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on: ubuntu-latest
+    env:
+      # Toolchain floor. v0.26.0 is the current release and the one this tree
+      # (the ownership `#=` spellings, the §10 web work) was built and the
+      # suite run against locally. Raise it the way the libraries do: verify
+      # the tree builds + the suite passes under the new pin, then move it.
+      CAJETA_VERSION: v0.26.0
+    steps:
+      - name: Check out cabra
+        uses: actions/checkout@v4
+        with:
+          path: cabra
+
+      # The three deps that are NOT resolvable from Olla at cabra's pins.
+      # run-tests.sh finds them as siblings of the cabra checkout and builds
+      # each into a .cja; unit / codec / jinja resolve from Olla and need no
+      # checkout. Pinned to each repo's main — the same thing a local dev tree
+      # holds.
+      - name: Check out cajeta-llm
+        uses: actions/checkout@v4
+        with:
+          repository: jklappenbach/cajeta-llm
+          path: cajeta-llm
+      - name: Check out cajeta-http
+        uses: actions/checkout@v4
+        with:
+          repository: jklappenbach/cajeta-http
+          path: cajeta-http
+      - name: Check out cajeta-logging
+        uses: actions/checkout@v4
+        with:
+          repository: jklappenbach/cajeta-logging
+          path: cajeta-logging
+
+      # Same install the shared lib-release workflow uses: the toolchain .deb
+      # from the cajeta release, by tag.
+      - name: Install cajeta toolchain (${{ env.CAJETA_VERSION }})
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh release download "$CAJETA_VERSION" \
+            --repo jklappenbach/cajeta --pattern 'cajeta_*_amd64.deb' --dir /tmp
+          sudo apt-get update
+          sudo apt-get install -y /tmp/cajeta_*_amd64.deb
+          cajeta --version || true
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: cabra/web/package-lock.json
+
+      # The web client is part of cabra now: gate its typecheck, its protocol
+      # tests, and that it builds — a broken client should fail the same push.
+      - name: Build + test the web client
+        working-directory: cabra/web
+        run: |
+          set -euo pipefail
+          npm ci
+          npm run build
+          npm test
+
+      # The cabra suite. run-tests.sh builds the sibling deps (llm/http/logging)
+      # and resolves the rest from Olla, then runs the tests on the cpu backend.
+      # The ownership-migration switches stay warn-first, as locally.
+      - name: Build + test cabra
+        working-directory: cabra
+        timeout-minutes: 30
+        run: ./run-tests.sh

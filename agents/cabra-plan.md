@@ -587,10 +587,16 @@ spawning frame. Measured, three shapes.
       *(13 vitest cases pin the protocol; the UI drives that client.)*
 - [~] 11.2.5 CI: `npm ci && npm run build` on the cabra workflow; the
       release bundles `web/dist` beside the executable; `docs/web.md`.
-      *(`docs/web.md` written; `web/dist` and `node_modules` gitignored,
-      built by CI. The workflow wiring is BLOCKED on cabra having no
-      `.github/workflows` yet — cabra has never been release-packaged;
-      folded into unit 12's release step or a cabra-CI task.)*
+      *(`docs/web.md` written; `web/dist` and `node_modules` gitignored.
+      GATING CI landed as `.github/workflows/ci.yml` (build + full suite
+      + web typecheck/test/build on every main push, no publish). cabra
+      could NOT reuse the shared `lib-release.yml` the libraries use:
+      dev.cajeta.llm is not on Olla and the http/logging pins are newer
+      than Olla carries, so the gate clones those three siblings and
+      lets run-tests.sh build them. The app-RELEASE (package the exe +
+      web/dist, GitHub Release) is still owed and rides unit 12, where
+      the primavera dep lands too. Publishing llm/http/logging to Olla
+      would let this collapse into the shared workflow.)*
 
 ### 11.3 Acceptance
 - [~] 11.3.1 Julian opens `http://127.0.0.1:<port>/` against a resident
