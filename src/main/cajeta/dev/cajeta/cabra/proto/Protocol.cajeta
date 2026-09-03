@@ -68,7 +68,8 @@ public final class Protocol {
             return #r;
         }
         if (op.equals("health") || op.equals("shutdown")
-                || op.equals("open") || op.equals("close")) {
+                || op.equals("open") || op.equals("close")
+                || op.equals("cancel")) {
             r.ok = true;
             return #r;
         }

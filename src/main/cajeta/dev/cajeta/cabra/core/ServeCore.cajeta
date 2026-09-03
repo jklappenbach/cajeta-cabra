@@ -89,6 +89,17 @@ public final class ServeCore {
             ch.writeMessage(m);
             return true;
         }
+        if (r.op.equals("cancel")) {
+            // §10.5. This core drives a turn to completion inside
+            // `handle`, so by the time a cancel is READ nothing is in
+            // flight: the answer is always the refusal the transports
+            // give for a finished id. The live transports (stdio Serve,
+            // ws Host) submit-and-step and cancel for real.
+            String m #= Wire.error(r.id, r.hasId, ErrKind.BAD_REQUEST,
+                "cancel: no request " + r.id + " in flight", false);
+            ch.writeMessage(m);
+            return true;
+        }
 
         // generate / chat.
         int64 sid = 0L;

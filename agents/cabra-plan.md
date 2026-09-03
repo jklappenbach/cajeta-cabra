@@ -522,9 +522,11 @@ spawning frame. Measured, three shapes.
 - [ ] 11.1.2 `GET /ws` still upgrades, and a ws client's turn is
       byte-identical to unit 8's ClientTest transcript — the HTTP front
       changes nothing on the socket.
-- [ ] 11.1.3 `cancel` ends an in-flight turn with `finish: "cancel"`, on
+- [x] 11.1.3 `cancel` ends an in-flight turn with `finish: "cancel"`, on
       stdio and on ws; a cancel for an unknown id is an error, not a
       crash; the other session's turn is unperturbed (§5.2.7).
+      *(CancelTest, 3 cases; the ws arm also pins that a cancel names
+      only THIS connection's id — a foreign id is refused.)*
 - [ ] 11.1.4 Protocol-client module tests (vitest, no DOM): auth then
       open; chunk/done/error sequencing; reconnect resumes by session id;
       `session_gone` → open + resubmit with a notice; cancel; several
@@ -534,9 +536,16 @@ spawning frame. Measured, three shapes.
       (the does-NOT-fire half).
 
 ### 11.2 Coding
-- [ ] 11.2.1 `cancel` op: `Protocol`, `ServeCore`, `Serve` (stdio),
+- [x] 11.2.1 `cancel` op: `Protocol`, `ServeCore`, `Serve` (stdio),
       `Host` (ws) — engine-side request cancel via the scheduler; `Wire`
       finish reason `cancel`; the CLI client maps Ctrl-C to it.
+      *(Engine: cajeta-llm b6b0c27 — `Request.FINISH_CANCEL`,
+      `Scheduler.cancel`, `LlmEngine.cancel`, 3 SchedulerTest cases.
+      The CLI client is a JSONL relay, not a REPL: a parent's
+      `{"op":"cancel","id":N}` line is forwarded verbatim, so a
+      connected conversation cancels exactly as an embedded one. There
+      is no Ctrl-C mapping because there is no interactive loop to map
+      it in — and the stdlib has no signal surface yet.)*
 - [ ] 11.2.2 HTTP front on the host listener: non-upgrade requests go to
       cajeta-http `StaticFile` rooted at `--web`; `/ws` to the existing
       `WsUpgrade` path. (Unit 12 replaces this with `HttpServer`/`Router`

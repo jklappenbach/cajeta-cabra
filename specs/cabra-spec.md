@@ -101,6 +101,9 @@ on top of them.
   - `{"op":"health","id":3}` — state before/during/after load.
   - `{"op":"shutdown"}` — drain and exit 0. EOF on stdin means the
     same.
+  - `{"op":"cancel","id":N}` — end request N where it is (§10.5,
+    added 2026-09-02): its done line reports `finish: "cancel"` with
+    the count as frozen. An id not in flight is an error carrying it.
 - **3.1.2 Responses** (stdout, one object per line):
   - stream chunks: `{"id":1,"chunk":"text"}` — one per decoded span,
     EOG tokens never present (§4.2).

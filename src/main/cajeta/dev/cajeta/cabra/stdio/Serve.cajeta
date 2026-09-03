@@ -163,6 +163,20 @@ public final class Serve implements TokenSink {
             return true;
         }
 
+        if (r.op.equals("cancel")) {
+            // §10.5: end request `id` where it is; the done line (finish
+            // "cancel", the count as frozen) follows on the next reap.
+            // Not in flight — finished, never submitted, or a typo — is
+            // a refusal carrying the id, so a client can tell "too late"
+            // from "cancelled".
+            int32 slot = this.slotOfId(r.id);
+            if (slot < 0 || !this.engine.cancel(this.trRid[slot])) {
+                Protocol.emitError(this.out, r.id, true,
+                    "cancel: no request " + r.id + " in flight");
+            }
+            return true;
+        }
+
         if (r.op.equals("chat")) {
             String rendered #= ChatOp.render(this.tpl, r.messagesRaw);
             if (rendered == null) {
@@ -400,6 +414,18 @@ public final class Serve implements TokenSink {
         return worst + 64;
     }
 
+    /** The tracked slot carrying caller id `id`, or -1. */
+    int32 slotOfId(int64 id) {
+        int32 i = 0;
+        while (i < this.cap) {
+            if (this.trOpen[i] && this.trId[i] == id) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+
     /** Emit done lines for every tracked request that has finished. */
     int32 reapFinished() {
         int32 done = 0;
@@ -432,6 +458,9 @@ public final class Serve implements TokenSink {
         }
         if (q.finishReason() == Request.FINISH_STOP) {
             finish = "stop";
+        }
+        if (q.finishReason() == Request.FINISH_CANCEL) {
+            finish = "cancel";
         }
         int64 endNs = Clock.nanoTime();
         int64 pMs = 0L;

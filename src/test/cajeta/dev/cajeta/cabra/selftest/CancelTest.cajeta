@@ -1,0 +1,313 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.codec.json.Json;
+import cajeta.codec.json.JsonObject;
+import cajeta.codec.json.JsonValue;
+import cajeta.collection.ArrayList;
+import cajeta.concurrent.Tasks;
+import cajeta.io.file.File;
+import cajeta.io.file.FileWriter;
+import cajeta.io.file.OpenMode;
+import cajeta.io.net.AsyncReader;
+import cajeta.io.net.AsyncWriter;
+import cajeta.io.net.IpAddress;
+import cajeta.io.net.SocketAddress;
+import cajeta.io.net.TcpStream;
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.http.ws.WebSocket;
+import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.cabra.stdio.Serve;
+import dev.cajeta.cabra.ws.Host;
+
+/**
+ * Plan 11.1.3 (spec §10.5) — `cancel` ends an in-flight turn with
+ * `finish: "cancel"` on both transports, refuses an id that is not in
+ * flight, and never perturbs a neighbour (§5.2.7): the OTHER request's
+ * chunk text is compared byte-for-byte against its solo run, on the
+ * same toy engine the concurrency tests use.
+ */
+public class CancelTest {
+
+    public CancelTest() { return; }
+
+    // ── stdio ──────────────────────────────────────────────────────────
+
+    /** Two requests in flight; 11 is cancelled after two quanta. Its
+     *  done line says cancel with a frozen, partial count; 12 finishes
+     *  exactly as it does alone. */
+    @Test
+    public void cancelEndsATurnAndLeavesTheOtherUntouched() {
+        String solo12 #= ConcurrencyTest.serialRun("tmp/cx-solo-12.jsonl",
+            12L, ConcurrencyTest.PROMPT_B);
+
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        String path = "tmp/cx-stdio.jsonl";
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, ConcurrencyTest.TOY, 128);
+        s.setCapacity(2);
+        String g11 #= ConcurrencyTest.genLine(11L, ConcurrencyTest.PROMPT_A);
+        String g12 #= ConcurrencyTest.genLine(12L, ConcurrencyTest.PROMPT_B);
+        s.handleLine(g11);
+        s.handleLine(g12);
+        s.driveStep();
+        s.driveStep();
+        Assert.equals(2L, (int64) s.inFlight());
+        boolean cont = s.handleLine("{\"op\":\"cancel\",\"id\":11}");
+        Assert.isTrue(cont);
+        s.drive();
+        s.close();
+
+        ArrayList<String> lines #= ConcurrencyTest.linesOf(path);
+        String f11 #= ConcurrencyTest.finishFor(lines, 11L);
+        Assert.equals("cancel", f11);
+        int64 gen11 = CancelTest.genTokensFor(lines, 11L);
+        Assert.isTrue(gen11 > 0L);
+        Assert.isTrue(gen11 < 6L);
+        String f12 #= ConcurrencyTest.finishFor(lines, 12L);
+        Assert.equals("budget", f12);
+        String c12 #= ConcurrencyTest.chunksFor(lines, 12L);
+        Assert.isTrue(c12.equals(solo12));
+    }
+
+    /** The does-NOT-fire half: cancelling an id that is not in flight
+     *  is an error carrying that id, and the server keeps serving. */
+    @Test
+    public void cancelOfAnUnknownIdIsAnErrorNotACrash() {
+        LlmEngine e #= ConcurrencyTest.engine(1);
+        String path = "tmp/cx-unknown.jsonl";
+        FileWriter fw #= File.openWrite(path, OpenMode.WRITE);
+        Serve s = heap Serve(#e, #fw, ConcurrencyTest.TOY, 128);
+        Assert.isTrue(s.handleLine("{\"op\":\"cancel\",\"id\":99}"));
+        Assert.isTrue(s.handleLine("{\"op\":\"cancel\"}"));
+        String g #= ConcurrencyTest.genLine(5L, ConcurrencyTest.PROMPT_A);
+        s.handleLine(g);
+        s.drive();
+        // Cancelling a request that already finished is the same refusal.
+        Assert.isTrue(s.handleLine("{\"op\":\"cancel\",\"id\":5}"));
+        s.close();
+
+        ArrayList<String> lines #= ConcurrencyTest.linesOf(path);
+        Assert.isTrue(CancelTest.errorFor(lines, 99L) != null);
+        Assert.isTrue(CancelTest.errorForNull(lines));
+        String f5 #= ConcurrencyTest.finishFor(lines, 5L);
+        Assert.equals("budget", f5);
+        Assert.isTrue(CancelTest.errorFor(lines, 5L) != null);
+    }
+
+    // ── ws ─────────────────────────────────────────────────────────────
+
+    /** A ws client that cancels its own turn after the first chunk,
+     *  having first tried to cancel an id that is not its own. */
+    static class CancelRun {
+        public int32 port;
+        public int64 session;
+        public String finish;
+        public int32 chunks;
+        public String foreignErrKind;
+        public boolean sawAuthed;
+        public String acc;          // the neighbour's chunk text
+        public CancelRun waitFor;   // the neighbour shuts down after this
+        public CancelRun() {
+            this.port = 0;
+            this.session = 0L - 1L;
+            this.finish = "";
+            this.chunks = 0;
+            this.foreignErrKind = "";
+            this.sawAuthed = false;
+            this.acc = "";
+            this.waitFor = null;
+        }
+    }
+
+    /** The neighbour: id 2, a plain 6-token turn, then — once the
+     *  canceller has its done line — shutdown so the host loop returns.
+     *  (Its own client, not HostTest.runClient: `spawn` takes a bare
+     *  class-method call, so a cross-class spawn cannot be written.) */
+    static async int32 runNeighbour(CancelRun cr) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(cr.port, rd, wr);
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        cr.sawAuthed = au != null && au.contains("authed");
+        ws.send("{\"op\":\"open\",\"id\":2}");
+        String op #= HostTest.recvText(ws);
+        JsonValue ov #= Json.parse(op);
+        cr.session = ov.object().get("session").asInt64();
+        ws.send("{\"op\":\"generate\",\"id\":2,\"session\":" + cr.session
+            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_B
+            + "\",\"n\":6,\"temp\":0}");
+        while (true) {
+            String line #= HostTest.recvText(ws);
+            if (line == null) {
+                break;
+            }
+            JsonValue v #= Json.parse(line);
+            JsonObject o = v.object();
+            if (o.containsKey("chunk")) {
+                String ctext #= o.get("chunk").asString();
+                cr.acc = cr.acc + ctext;
+            } else if (o.containsKey("done")) {
+                String f #= o.get("finish").asString();
+                cr.finish = f;
+                break;
+            }
+        }
+        int32 tries = 0;
+        while (cr.waitFor != null && cr.waitFor.finish.byteLength() == 0
+                && tries < 1000) {
+            Tasks.sleepMillis(5L);
+            tries = tries + 1;
+        }
+        ws.send("{\"op\":\"shutdown\"}");
+        Tasks.sleepMillis(200L);
+        sock.close();
+        return 0;
+    }
+
+    static async int32 runCanceller(CancelRun cr) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dial(cr.port, rd, wr);
+
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        cr.sawAuthed = au != null && au.contains("authed");
+        ws.send("{\"op\":\"open\",\"id\":7}");
+        String op #= HostTest.recvText(ws);
+        JsonValue ov #= Json.parse(op);
+        cr.session = ov.object().get("session").asInt64();
+
+        // Not in flight on THIS connection (the other client owns id 2):
+        // refused with the id echoed, and nothing else happens.
+        ws.send("{\"op\":\"cancel\",\"id\":2}");
+        String fe #= HostTest.recvText(ws);
+        JsonValue fv #= Json.parse(fe);
+        JsonObject fo = fv.object();
+        if (fo.containsKey("kind") && fo.get("id").asInt64() == 2L) {
+            String k #= fo.get("kind").asString();
+            cr.foreignErrKind = k;
+        }
+
+        ws.send("{\"op\":\"generate\",\"id\":7,\"session\":" + cr.session
+            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
+            + "\",\"n\":40,\"temp\":0}");
+        boolean sent = false;
+        while (true) {
+            String line #= HostTest.recvText(ws);
+            if (line == null) {
+                break;
+            }
+            JsonValue v #= Json.parse(line);
+            JsonObject o = v.object();
+            if (o.containsKey("chunk")) {
+                cr.chunks = cr.chunks + 1;
+                if (!sent) {
+                    ws.send("{\"op\":\"cancel\",\"id\":7}");
+                    sent = true;
+                }
+            } else if (o.containsKey("done")) {
+                String f #= o.get("finish").asString();
+                cr.finish = f;
+                break;
+            }
+        }
+        sock.close();
+        return 0;
+    }
+
+    /** 11.1.3 over ws: the canceller's turn ends with `cancel` well
+     *  short of its 40-token budget; the neighbour's output is its solo
+     *  text; a cancel for another connection's id is refused. */
+    @Test
+    public void cancelOverWsEndsOnlyItsOwnTurn() {
+        String soloB #= ConcurrencyTest.serialRun("tmp/cx-ws-solo-b.jsonl",
+            2L, ConcurrencyTest.PROMPT_B);
+
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 2, 60000L);
+        h.listen(0);
+
+        CancelRun cx = heap CancelRun();
+        cx.port = h.port;
+        CancelRun cb = heap CancelRun();
+        cb.port = h.port;
+        cb.waitFor = cx;
+
+        scope {
+            spawn runCanceller(cx);
+            spawn runNeighbour(cb);
+            h.run();
+            h.shutdown();
+        }
+
+        Assert.isTrue(cx.sawAuthed);
+        Assert.equals("bad_request", cx.foreignErrKind);
+        Assert.equals("cancel", cx.finish);
+        Assert.isTrue(cx.chunks > 0);
+        Assert.isTrue(cx.chunks < 40);
+        Assert.isTrue(cb.acc.equals(soloB));
+        Assert.isTrue(cb.finish.byteLength() > 0);
+    }
+
+    // ── helpers ────────────────────────────────────────────────────────
+
+    static int64 genTokensFor(ArrayList<String> lines, int64 id) {
+        int32 i = 0;
+        while (i < (int32) lines.count()) {
+            JsonValue v #= Json.parse(lines.get(i));
+            if (v.kind() == JsonValue.OBJECT) {
+                JsonObject o = v.object();
+                if (o.containsKey("done")
+                        && o.get("id").asInt64() == id) {
+                    return o.get("usage").object().get("gen_tokens")
+                        .asInt64();
+                }
+            }
+            i = i + 1;
+        }
+        return 0L - 1L;
+    }
+
+    static #String errorFor(ArrayList<String> lines, int64 id) {
+        int32 i = 0;
+        while (i < (int32) lines.count()) {
+            JsonValue v #= Json.parse(lines.get(i));
+            if (v.kind() == JsonValue.OBJECT) {
+                JsonObject o = v.object();
+                if (o.containsKey("error") && o.containsKey("id")
+                        && o.get("id").kind() == JsonValue.NUMBER
+                        && o.get("id").asInt64() == id) {
+                    String m #= o.get("error").asString();
+                    return #m;
+                }
+            }
+            i = i + 1;
+        }
+        return null;
+    }
+
+    static boolean errorForNull(ArrayList<String> lines) {
+        int32 i = 0;
+        while (i < (int32) lines.count()) {
+            JsonValue v #= Json.parse(lines.get(i));
+            if (v.kind() == JsonValue.OBJECT) {
+                JsonObject o = v.object();
+                if (o.containsKey("error") && o.containsKey("id")
+                        && o.get("id").kind() == JsonValue.NULL) {
+                    return true;
+                }
+            }
+            i = i + 1;
+        }
+        return false;
+    }
+}

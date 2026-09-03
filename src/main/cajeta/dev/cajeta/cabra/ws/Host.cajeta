@@ -302,6 +302,21 @@ public final class Host implements TokenSink {
             this.say(connSlot, m);
             return;
         }
+        if (r.op.equals("cancel")) {
+            // §10.5: only THIS connection's request `id` — ids are the
+            // caller's, so two connections may both hold a 7. Not in
+            // flight here (finished, foreign, never submitted) is a
+            // refusal carrying the id; the done line (finish "cancel")
+            // follows on the next reap.
+            int32 slot = r.hasId ? this.slotOfId(connSlot, r.id) : (0 - 1);
+            if (slot < 0 || !this.engine.cancel(this.trRid[slot])) {
+                String m #= Wire.error(r.id, r.hasId, ErrKind.BAD_REQUEST,
+                    "cancel: no request " + r.id
+                    + " in flight on this connection", false);
+                this.say(connSlot, m);
+            }
+            return;
+        }
 
         // generate / chat.
         if (r.hasSession) {
@@ -513,6 +528,9 @@ public final class Host implements TokenSink {
                     if (q.finishReason() == Request.FINISH_STOP) {
                         finish = "stop";
                     }
+                    if (q.finishReason() == Request.FINISH_CANCEL) {
+                        finish = "cancel";
+                    }
                     String m #= Wire.done(this.trId[i], finish);
                     this.say(this.trConn[i], m);
                     this.trOpen[i] = false;
@@ -559,6 +577,19 @@ public final class Host implements TokenSink {
             this.chunker = heap Utf8Chunker(this.cap);
         }
         return;
+    }
+
+    /** The in-flight slot carrying caller id `id` on `connSlot`, or -1. */
+    int32 slotOfId(int32 connSlot, int64 id) {
+        int32 i = 0;
+        while (i < this.cap) {
+            if (this.trOpen[i] && this.trConn[i] == connSlot
+                    && this.trId[i] == id) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
     }
 
     /** TokenSink: rid -> (wireId, conn); decode one token, hold back
