@@ -585,9 +585,14 @@ spawning frame. Measured, three shapes.
       panel, token gate, health badge, diag panel), localStorage
       persistence. Both themes from one token set.
       *(13 vitest cases pin the protocol; the UI drives that client.)*
-- [~] 11.2.5 CI: `npm ci && npm run build` on the cabra workflow; the
+- [x] 11.2.5 CI: `npm ci && npm run build` on the cabra workflow; the
       release bundles `web/dist` beside the executable; `docs/web.md`.
-      *(`docs/web.md` written; `web/dist` and `node_modules` gitignored.
+      *(GATE GREEN as of fdbc764 / run 33805028181. The red was a
+      fresh-checkout crash, not a compiler bug: the suite writes to the
+      gitignored/untracked `tmp/`, absent on CI, so File.readAllBytes
+      returned nil and linesOf null-derefed — fixed by creating tmp/ in
+      TestMain + run-tests.sh.
+      `docs/web.md` written; `web/dist` and `node_modules` gitignored.
       GATING CI landed as `.github/workflows/ci.yml` (build + full suite
       + web typecheck/test/build on every main push, no publish). cabra
       could NOT reuse the shared `lib-release.yml` the libraries use:
