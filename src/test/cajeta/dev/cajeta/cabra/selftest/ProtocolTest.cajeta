@@ -104,7 +104,7 @@ public class ProtocolTest {
         out.flush();
         fw.close();
 
-        int8[] all #= File.readAllBytes(path);
+        int8[] all = File.readAllBytes(path);
         String text = heap String(#all, (int32) all.count());
         // Split on newlines; each line must parse.
         int32 nLines = 0;

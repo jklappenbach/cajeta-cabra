@@ -40,7 +40,7 @@ public class ConcurrencyTest {
     // ── harness ────────────────────────────────────────────────────────
 
     static #ArrayList<String> linesOf(String path) {
-        int8[] all #= File.readAllBytes(path);
+        int8[] all = File.readAllBytes(path);
         String text = heap String(#all, (int32) all.count());
         int8[] tb #= text.toBytes();
         ArrayList<String> out = heap ArrayList<String>();
