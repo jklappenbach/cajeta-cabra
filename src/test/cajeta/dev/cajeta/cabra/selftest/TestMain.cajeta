@@ -1,10 +1,21 @@
 package dev.cajeta.cabra.selftest;
 
+import cajeta.io.file.Path;
 import dev.cajeta.unit.Runner;
 
 /** Test entry: reflective @Test discovery across the binary. */
 public final class TestMain {
     public static int32 run() {
+        // Several suites (ConcurrencyTest, HostTest, ServeToyTest,
+        // ProtocolTest, ServeOpsTest) write transcripts to `tmp/…jsonl`
+        // and read them back. `tmp/` is gitignored and untracked, so a
+        // fresh checkout — every CI runner — starts without it:
+        // File.openWrite then never creates the file, File.readAllBytes
+        // returns nil, and the first reader (linesOf, at all.count())
+        // null-derefs, taking the whole binary down with a SIGSEGV. It
+        // only ever passed where a prior local run had already made the
+        // directory. Ensure it exists once, here, before discovery.
+        Path.of("tmp").mkdirs();
         return Runner.runAll();
     }
 }

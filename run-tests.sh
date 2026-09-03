@@ -157,4 +157,9 @@ echo ">> building + running the cabra test binary"
     dev.cajeta.cabra.selftest.TestMain.run \
     "$here/src/test/cajeta" "$out" >/dev/null
 
+# Tests write transcripts under tmp/ (gitignored, untracked) and read them
+# back; a fresh checkout has no tmp/, so the writes silently no-op and the
+# readers crash on a nil byte[]. TestMain also ensures this, but create it
+# here too so the binary is safe however it's launched.
+mkdir -p "$here/tmp"
 ( cd "$here" && "$out/cabratests" )
