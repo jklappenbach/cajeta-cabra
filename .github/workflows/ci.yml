@@ -7,9 +7,11 @@
 #   - dev.cajeta.llm  is not published to Olla at all (the engine is not a
 #     library), and
 #   - the http / logging PINS in cajeta.json (0.1.4 / 0.7.0) are newer than
-#     what Olla carries.
+#     what Olla carries, and
+#   - codec / jinja are only TRANSITIVE deps here (pulled in by llm/http), so
+#     cabra.json carries no version pin run-tests.sh could fetch them by.
 # So this gate clones those siblings and lets run-tests.sh build them, exactly
-# as a local checkout does. It is gating ONLY — build + full suite on every
+# as a local checkout does. (unit is a pinned dev-dep and resolves from Olla.) It is gating ONLY — build + full suite on every
 # main push, NO tag path and NO publish (the app-release that packages the exe
 # + web/dist rides cabra unit 12, where the primavera dependency lands too).
 #
@@ -61,6 +63,21 @@ jobs:
         with:
           repository: jklappenbach/cajeta-logging
           path: cajeta-logging
+      # codec and jinja ARE on Olla, but cabra declares them only
+      # transitively (through llm/http), so run-tests.sh has no version
+      # pin to request them by — it only finds them as siblings. Clone
+      # them too, mirroring a local tree. (unit IS a pinned dev-dep, so
+      # it resolves from Olla without a checkout.)
+      - name: Check out cajeta-codec
+        uses: actions/checkout@v4
+        with:
+          repository: jklappenbach/cajeta-codec
+          path: cajeta-codec
+      - name: Check out cajeta-jinja
+        uses: actions/checkout@v4
+        with:
+          repository: jklappenbach/cajeta-jinja
+          path: cajeta-jinja
 
       # Same install the shared lib-release workflow uses: the toolchain .deb
       # from the cajeta release, by tag.
