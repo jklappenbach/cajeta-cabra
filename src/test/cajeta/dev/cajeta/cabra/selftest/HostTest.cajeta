@@ -564,7 +564,7 @@ public class HostTest {
     public void theOutboxBoundRefusesInsteadOfBlocking() {
         IpAddress la #= IpAddress.loopbackV4();
         SocketAddress addr #= SocketAddress.of(#la, 0);
-        TcpListener l = TcpListener.bind(addr);
+        TcpListener l #= TcpListener.bind(addr);
         ClientRun ch = heap ClientRun();
         ch.port = l.boundPort();
         scope {

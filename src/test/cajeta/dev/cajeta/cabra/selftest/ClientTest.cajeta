@@ -216,7 +216,7 @@ public class ClientTest {
         // A port that WAS free a moment ago and has no listener now.
         IpAddress la #= IpAddress.loopbackV4();
         SocketAddress addr #= SocketAddress.of(#la, 0);
-        TcpListener l = TcpListener.bind(addr);
+        TcpListener l #= TcpListener.bind(addr);
         int32 deadPort = l.boundPort();
         l.close();
 
