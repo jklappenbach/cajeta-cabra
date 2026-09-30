@@ -1,10 +1,11 @@
 package dev.cajeta.cabra.diag;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.collection.ArrayList;
 import cajeta.concurrent.Lock;
 import cajeta.concurrent.LockGuard;
 import cajeta.concurrent.Semaphore;
-import cajeta.concurrent.Tasks;
 import cajeta.lang.String;
 import dev.cajeta.llm.DiagCallback;
 import dev.cajeta.llm.DiagRecord;
@@ -309,7 +310,7 @@ public final class DiagnosticBridge implements DiagCallback {
             if (done) {
                 return;
             }
-            Tasks.sleepMillis(1L);
+            Fiber.sleep(Duration.ofMillis(1L));
         }
     }
 
@@ -332,7 +333,7 @@ public final class DiagnosticBridge implements DiagCallback {
                 return;
             }
             this.ready.release();
-            Tasks.sleepMillis(1L);
+            Fiber.sleep(Duration.ofMillis(1L));
         }
     }
 

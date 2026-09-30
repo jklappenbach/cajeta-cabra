@@ -1,11 +1,12 @@
 package dev.cajeta.cabra.selftest;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.collection.ArrayList;
 import cajeta.io.file.File;
 import cajeta.io.file.FileWriter;
 import cajeta.io.file.OpenMode;
 import cajeta.lang.String;
-import cajeta.concurrent.Tasks;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
 import dev.cajeta.llm.Diag;
@@ -60,7 +61,7 @@ public class DiagnosticBridgeTest {
         public int32 n;
         public SlowAppender() { this.n = 0; }
         public void append(#int8[] line) {
-            Tasks.sleepMillis(25L);
+            Fiber.sleep(Duration.ofMillis(25L));
             this.n = this.n + 1;
             return;
         }

@@ -1,10 +1,11 @@
 package dev.cajeta.cabra.selftest;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.codec.json.Json;
 import cajeta.codec.json.JsonObject;
 import cajeta.codec.json.JsonValue;
 import cajeta.collection.ArrayList;
-import cajeta.concurrent.Tasks;
 import cajeta.io.file.File;
 import cajeta.io.file.FileWriter;
 import cajeta.io.file.OpenMode;
@@ -180,12 +181,12 @@ public class DiagForwardTest {
                 done = true;
                 // Anything still queued for us would arrive now; give
                 // it a moment so a late line is COUNTED, not missed.
-                Tasks.sleepMillis(100L);
+                Fiber.sleep(Duration.ofMillis(100L));
                 break;
             }
         }
         ws.send("{\"op\":\"shutdown\"}");
-        Tasks.sleepMillis(200L);
+        Fiber.sleep(Duration.ofMillis(200L));
         sock.close();
         return 0;
     }

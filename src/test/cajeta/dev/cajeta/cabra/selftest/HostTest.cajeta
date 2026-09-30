@@ -1,9 +1,10 @@
 package dev.cajeta.cabra.selftest;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.codec.json.Json;
 import cajeta.codec.json.JsonObject;
 import cajeta.codec.json.JsonValue;
-import cajeta.concurrent.Tasks;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.IpAddress;
@@ -141,14 +142,14 @@ public class HostTest {
             while (cr.waitFor != null
                     && cr.waitFor.finish.byteLength() == 0
                     && tries < 1000) {
-                Tasks.sleepMillis(5L);
+                Fiber.sleep(Duration.ofMillis(5L));
                 tries = tries + 1;
             }
             ws.send("{\"op\":\"shutdown\"}");
             // Let the frame FLUSH: close-on-send loses the buffered
             // frame and the host loop waits forever (measured — the
             // 61-minute suite wedge was exactly this).
-            Tasks.sleepMillis(200L);
+            Fiber.sleep(Duration.ofMillis(200L));
         }
         sock.close();
         return 0;
@@ -179,7 +180,7 @@ public class HostTest {
     static async int32 runShutdowner(ClientRun cr, ClientRun watched) {
         int32 tries = 0;
         while (!watched.closedEarly && tries < 1000) {
-            Tasks.sleepMillis(5L);
+            Fiber.sleep(Duration.ofMillis(5L));
             tries = tries + 1;
         }
         IpAddress a #= IpAddress.loopbackV4();
@@ -192,7 +193,7 @@ public class HostTest {
         String au #= HostTest.recvText(ws);
         cr.sawAuthed = au != null && au.contains("authed");
         ws.send("{\"op\":\"shutdown\"}");
-        Tasks.sleepMillis(200L);
+        Fiber.sleep(Duration.ofMillis(200L));
         sock.close();
         return 0;
     }
@@ -278,7 +279,7 @@ public class HostTest {
             cr.acc = rep;
         }
         ws.send("{\"op\":\"shutdown\"}");
-        Tasks.sleepMillis(200L);
+        Fiber.sleep(Duration.ofMillis(200L));
         sock.close();
         return 0;
     }
@@ -329,10 +330,10 @@ public class HostTest {
     static async int32 runReclaimer(ClientRun cr, ClientRun dead) {
         int32 tries = 0;
         while (dead.session < 0L && tries < 1000) {
-            Tasks.sleepMillis(5L);
+            Fiber.sleep(Duration.ofMillis(5L));
             tries = tries + 1;
         }
-        Tasks.sleepMillis(600L);
+        Fiber.sleep(Duration.ofMillis(600L));
         IpAddress a #= IpAddress.loopbackV4();
         SocketAddress addr #= SocketAddress.of(#a, cr.port);
         TcpStream sock #= TcpStream.connectAsync(#addr);
@@ -349,7 +350,7 @@ public class HostTest {
             cr.session = ov.object().get("session").asInt64();
         }
         ws.send("{\"op\":\"shutdown\"}");
-        Tasks.sleepMillis(200L);
+        Fiber.sleep(Duration.ofMillis(200L));
         sock.close();
         return 0;
     }
@@ -375,7 +376,7 @@ public class HostTest {
             + ConcurrencyTest.PROMPT_A + "\",\"n\":16,\"temp\":0}");
         int32 tries = 0;
         while (watched.finish.byteLength() == 0 && tries < 2000) {
-            Tasks.sleepMillis(5L);
+            Fiber.sleep(Duration.ofMillis(5L));
             tries = tries + 1;
         }
         sock.close();
@@ -459,7 +460,7 @@ public class HostTest {
             }
         }
         ws.send("{\"op\":\"shutdown\"}");
-        Tasks.sleepMillis(200L);
+        Fiber.sleep(Duration.ofMillis(200L));
         sock.close();
         return 0;
     }
@@ -472,7 +473,7 @@ public class HostTest {
         TcpStream sock #= TcpStream.connectAsync(#addr);
         int32 tries = 0;
         while (!cr.closedEarly && tries < 2000) {
-            Tasks.sleepMillis(5L);
+            Fiber.sleep(Duration.ofMillis(5L));
             tries = tries + 1;
         }
         sock.close();

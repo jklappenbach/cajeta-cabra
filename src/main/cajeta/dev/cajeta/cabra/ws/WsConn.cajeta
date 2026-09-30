@@ -1,10 +1,11 @@
 package dev.cajeta.cabra.ws;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.collection.ArrayList;
 import cajeta.concurrent.Lock;
 import cajeta.concurrent.LockGuard;
 import cajeta.concurrent.Semaphore;
-import cajeta.concurrent.Tasks;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.TcpStream;
@@ -308,7 +309,7 @@ public final class WsConn {
         }
         int32 spins = 0;
         while (!this.readerDone && spins < 3000) {
-            Tasks.sleepMillis(1L);
+            Fiber.sleep(Duration.ofMillis(1L));
             spins = spins + 1;
         }
         this.stopWriter();
@@ -331,7 +332,7 @@ public final class WsConn {
             if (done || this.writeTask == null) {
                 return;
             }
-            Tasks.sleepMillis(1L);
+            Fiber.sleep(Duration.ofMillis(1L));
         }
     }
 }

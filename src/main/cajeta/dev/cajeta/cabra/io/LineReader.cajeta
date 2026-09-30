@@ -1,8 +1,9 @@
 package dev.cajeta.cabra.io;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.collection.ArrayList;
 import cajeta.concurrent.Channel;
-import cajeta.concurrent.Tasks;
 import cajeta.io.file.FileReader;
 import cajeta.lang.Optional;
 import cajeta.lang.String;
@@ -144,7 +145,7 @@ public final class LineReader {
     public void close() {
         this.stop = true;
         while (!this.stopped) {
-            Tasks.sleepMillis(1L);
+            Fiber.sleep(Duration.ofMillis(1L));
         }
         return;
     }

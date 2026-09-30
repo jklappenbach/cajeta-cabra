@@ -1,9 +1,10 @@
 package probe;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.codec.json.Json;
 import cajeta.codec.json.JsonObject;
 import cajeta.codec.json.JsonValue;
-import cajeta.concurrent.Tasks;
 import cajeta.io.net.AsyncReader;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.IpAddress;
@@ -104,13 +105,13 @@ public final class HostProbe {
             while (cr.other != null
                     && cr.other.finish.byteLength() == 0
                     && tries < 1000) {
-                Tasks.sleepMillis(5L);
+                Fiber.sleep(Duration.ofMillis(5L));
                 tries = tries + 1;
             }
             System.stdout.println(cr.tag + ": sending shutdown (waited "
                 + tries + ")");
             ws.send("{\"op\":\"shutdown\"}");
-            Tasks.sleepMillis(200L);
+            Fiber.sleep(Duration.ofMillis(200L));
         }
         sock.close();
         System.stdout.println(cr.tag + ": exit");
@@ -120,7 +121,7 @@ public final class HostProbe {
     static async int32 watchdog() {
         int32 i = 0;
         while (i < 12) {
-            Tasks.sleepMillis(2000L);
+            Fiber.sleep(Duration.ofMillis(2000L));
             System.stdout.println("[wd] mark0=" + WsConn.mark0
                 + " mark1=" + WsConn.mark1);
             i = i + 1;

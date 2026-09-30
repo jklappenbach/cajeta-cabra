@@ -1,7 +1,8 @@
 package dev.cajeta.cabra.selftest;
 
+import cajeta.concurrent.Fiber;
+import cajeta.time.Duration;
 import cajeta.collection.ArrayList;
-import cajeta.concurrent.Tasks;
 import cajeta.io.file.File;
 import cajeta.io.file.FileReader;
 import cajeta.io.file.FileWriter;
@@ -85,7 +86,7 @@ public class ClientTest {
     static async int32 runRelay(RelayRun rr) {
         int32 tries = 0;
         while (rr.waitFor != null && !rr.waitFor.done && tries < 2000) {
-            Tasks.sleepMillis(5L);
+            Fiber.sleep(Duration.ofMillis(5L));
             tries = tries + 1;
         }
         int64 sid = rr.session;
@@ -110,7 +111,7 @@ public class ClientTest {
     static async int32 runStopper(RelayRun watched, int32 port) {
         int32 tries = 0;
         while (!watched.done && tries < 2000) {
-            Tasks.sleepMillis(5L);
+            Fiber.sleep(Duration.ofMillis(5L));
             tries = tries + 1;
         }
         IpAddress a #= IpAddress.loopbackV4();
@@ -123,7 +124,7 @@ public class ClientTest {
         String au #= HostTest.recvText(ws);
         if (au != null) {
             ws.send("{\"op\":\"shutdown\"}");
-            Tasks.sleepMillis(200L);
+            Fiber.sleep(Duration.ofMillis(200L));
         }
         sock.close();
         return 0;
