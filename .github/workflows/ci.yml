@@ -2,21 +2,16 @@
 #
 # cabra is the ecosystem's first APPLICATION, and it cannot use the shared
 # reusable workflow (jklappenbach/cajeta/.github/workflows/lib-release.yml)
-# the libraries use: that workflow resolves a repo's dependencies from Olla,
-# and cabra's do not all live there —
-#   - dev.cajeta.llm  is not published to Olla at all (the engine is not a
-#     library), and
-#   - the http / logging PINS in cajeta.json (0.1.4 / 0.7.0) are newer than
-#     what Olla carries, and
-#   - codec / jinja are only TRANSITIVE deps here (pulled in by llm/http), so
-#     cabra.json carries no version pin run-tests.sh could fetch them by.
+# the libraries use, because it also builds and tests the web client, and
+# codec / jinja are only TRANSITIVE deps here (pulled in by llm/http), so
+# cabra.json carries no version pin run-tests.sh could fetch them by.
 # So this gate clones those siblings and lets run-tests.sh build them, exactly
 # as a local checkout does. (unit is a pinned dev-dep and resolves from Olla.) It is gating ONLY — build + full suite on every
 # main push, NO tag path and NO publish (the app-release that packages the exe
 # + web/dist rides cabra unit 12, where the primavera dependency lands too).
 #
-# When llm/http/logging are eventually published to Olla at cabra's pins, most
-# of this collapses back into the shared lib-release workflow.
+# llm, http and logging are on Olla at cabra's pins since 2026-10-03, so most
+# of this could collapse into the shared lib-release workflow.
 #
 # No pull_request trigger by design — this repo lands changes by pushing
 # straight to main (the fleet convention), so main-push CI is the only thing
@@ -36,7 +31,7 @@ jobs:
       # (the ownership `#=` spellings, the §10 web work) was built and the
       # suite run against locally. Raise it the way the libraries do: verify
       # the tree builds + the suite passes under the new pin, then move it.
-      CAJETA_VERSION: v0.26.0
+      CAJETA_VERSION: v0.33.0
     steps:
       - name: Check out cabra
         uses: actions/checkout@v4
