@@ -27,11 +27,10 @@ jobs:
   build-and-test:
     runs-on: ubuntu-latest
     env:
-      # Toolchain floor. v0.26.0 is the current release and the one this tree
-      # (the ownership `#=` spellings, the §10 web work) was built and the
-      # suite run against locally. Raise it the way the libraries do: verify
+      # Toolchain floor: the release this tree was built and its suite run
+      # against locally (v0.33.1, 56 passed, 2026-10-03). Raise it the way the libraries do: verify
       # the tree builds + the suite passes under the new pin, then move it.
-      CAJETA_VERSION: v0.33.0
+      CAJETA_VERSION: v0.33.1
     steps:
       - name: Check out cabra
         uses: actions/checkout@v4
