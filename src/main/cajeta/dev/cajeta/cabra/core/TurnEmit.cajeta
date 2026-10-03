@@ -16,7 +16,7 @@ public final class TurnEmit {
     public int32 sent;
 
     public TurnEmit(MsgChannel ch, int64 id) {
-        this.ch = ch;
+        this.ch #= ch;
         this.id = id;
         this.sent = 0;
         return;

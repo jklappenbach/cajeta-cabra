@@ -33,7 +33,7 @@ public final class ServeCore {
     public ServeCore(int32 maxSessions, int64 idleExpiryMs,
             TurnPort port) {
         this.reg = heap SessionRegistry(maxSessions, idleExpiryMs);
-        this.port = port;
+        this.port #= port;
         this.state = "ready";
         return;
     }

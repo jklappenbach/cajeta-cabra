@@ -25,7 +25,6 @@ import dev.cajeta.cabra.proto.Req;
 import dev.cajeta.cabra.proto.Wire;
 import dev.cajeta.cabra.stdio.Serve;
 import dev.cajeta.cabra.ChatOp;
-import dev.cajeta.http.middleware.StaticFile;
 
 /**
  * Host mode (spec §5.1.2, plan unit 7): one loaded model, N WebSocket
@@ -82,7 +81,7 @@ public final class Host implements TokenSink {
     // busy error. Admission happens as reaping frees slots.
     ChatTemplate tpl;          // owned; null when the model ships none
     int32 ctxLimit;            // 0 = no admission guard
-    StaticFile web;            // owned; null = no HTTP front (§10.1)
+    String webDir;             // owned; null = no HTTP front (§10.1)
     // §10.9 forwarding: the queue the bridge fills while armed, the
     // bridge itself (to register with the engine on demand), whether
     // it is registered regardless (--verbose), and how many in-flight
@@ -127,7 +126,7 @@ public final class Host implements TokenSink {
         this.diagWanted = 0;
         this.tpl = null;
         this.ctxLimit = 0;
-        this.web = null;
+        this.webDir = null;
         this.queueBound = 8;
         this.qLine = null;
         this.qConn = null;
@@ -141,8 +140,8 @@ public final class Host implements TokenSink {
      *  (index for `/`, assets by path, 404 otherwise). Unset, a plain
      *  GET is 404 + close and only the socket protocol is reachable. */
     public void setWebRoot(String dir) {
-        StaticFile sf #= StaticFile.create(dir);
-        this.web #= sf;
+        String d = "" + dir;
+        this.webDir #= d;
         return;
     }
 
@@ -152,8 +151,8 @@ public final class Host implements TokenSink {
      *  while at least one in-flight request wants records and
      *  unregisters after, so an unobserved engine builds nothing. */
     public void setDiag(DiagQueue q, DiagnosticBridge b, boolean always) {
-        this.diagQ = q;
-        this.diagBridge = b;
+        this.diagQ #= q;
+        this.diagBridge #= b;
         this.diagAlways = always;
         return;
     }
@@ -215,9 +214,9 @@ public final class Host implements TokenSink {
         return;
     }
 
-    /** The static-file middleware, or null when there is no web root. */
-    public StaticFile webRoot() {
-        return this.web;
+    /** The web root directory, or null when there is no HTTP front. */
+    public String webDir() {
+        return this.webDir;
     }
 
     /** Install the model's chat template. Left unset (null) the `chat`

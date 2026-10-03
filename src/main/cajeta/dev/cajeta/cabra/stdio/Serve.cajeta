@@ -129,8 +129,8 @@ public final class Serve implements TokenSink {
      *  (--verbose); otherwise it is registered only while some
      *  in-flight request wants records. */
     public void setDiag(DiagQueue q, DiagnosticBridge b, boolean always) {
-        this.diagQ = q;
-        this.diagBridge = b;
+        this.diagQ #= q;
+        this.diagBridge #= b;
         this.diagAlways = always;
         return;
     }

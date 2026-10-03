@@ -8,6 +8,7 @@ import cajeta.codec.json.JsonValue;
 import cajeta.io.file.File;
 import cajeta.io.file.Path;
 import cajeta.io.net.AsyncReader;
+import cajeta.io.net.ByteBuffer;
 import cajeta.io.net.AsyncWriter;
 import cajeta.io.net.IpAddress;
 import cajeta.io.net.SocketAddress;
@@ -16,9 +17,9 @@ import cajeta.io.net.uri.Uri;
 import cajeta.lang.String;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
-import dev.cajeta.http.HeaderValues;
-import dev.cajeta.http.HttpResponse;
-import dev.cajeta.http.h1.HttpParser;
+import dev.cajeta.http.ClientResponse;
+import dev.cajeta.http.HeadScanner;
+import dev.cajeta.http.h1.HttpParserLimits;
 import dev.cajeta.http.ws.WebSocket;
 import dev.cajeta.http.ws.WsUpgrade;
 import dev.cajeta.llm.LlmEngine;
@@ -91,33 +92,35 @@ public class WebFrontTest {
         return;
     }
 
-    /** Read one HTTP/1.1 response off the reader, staging any bytes
-     *  past it back — the same one-byte discipline the ws upgrade
-     *  uses, so a keep-alive follow-up is not swallowed. */
-    static #HttpResponse readResponse(AsyncReader rd) {
-        HttpParser p #= HttpParser.forResponse();
-        int8[] one = heap int8[1];
-        while (!p.isComplete()) {
-            int32 n = rd.read(one, 0, 1);
-            if (n == 0) {
-                p.endInput();
-                break;
-            }
-            p.feed(one, 1);
+    /** One response as the browser saw it: status, content type, body. */
+    static class Got {
+        public int32 status;
+        public String ctype;
+        public String body;
+        public Got() {
+            this.status = 0;
+            this.ctype = "";
+            this.body = "";
         }
-        HttpResponse resp #= p.takeResponse();
-        int8[] left #= p.leftover();
-        int32 ll = p.leftoverLength();
-        if (ll > 0) {
-            rd.stage(left, ll);
+    }
+
+    /** Reads one HTTP/1.1 response head and its Content-Length body, and
+     *  nothing past it, so a keep-alive follow-up is not swallowed. */
+    static #Got readResponse(AsyncReader rd) {
+        HttpParserLimits limits = heap HttpParserLimits();
+        ByteBuffer head #= HeadScanner.readHead(rd, limits);
+        ClientResponse cr = heap ClientResponse(limits.maxHeaderCount);
+        HeadScanner.parseResponse(head.array(), 0, head.readable(), cr);
+        Got g = heap Got();
+        g.status = cr.status();
+        String ct #= cr.headerString("Content-Type");
+        if (ct != null) {
+            g.ctype #= ct;
         }
-        // The parser stops at the head; the body is Content-Length
-        // bytes that follow, and on a keep-alive connection they MUST
-        // be consumed or the next status line is read out of them.
-        int64 cl = HeaderValues.contentLength(resp.getHeaders());
+        int64 cl = cr.headerInt64("Content-Length", 0L);
         if (cl > 0L) {
             int32 n = (int32) cl;
-            int8[] body #= heap int8[n];
+            int8[] body = heap int8[n];
             int32 got = 0;
             while (got < n) {
                 int32 r = rd.read(body, got, n - got);
@@ -126,9 +129,10 @@ public class WebFrontTest {
                 }
                 got = got + r;
             }
-            resp.body(body, got);
+            String b = heap String(#body, got);
+            g.body #= b;
         }
-        return #resp;
+        return #g;
     }
 
     static void sendGet(AsyncWriter wr, String path) {
@@ -139,14 +143,6 @@ public class WebFrontTest {
         return;
     }
 
-    static #String ctypeOf(HttpResponse r) {
-        String v #= r.getHeaders().get("Content-Type");
-        if (v == null) {
-            return #heap String();
-        }
-        return #v;
-    }
-
     static async int32 runBrowser(WebRun w) {
         IpAddress a #= IpAddress.loopbackV4();
         SocketAddress addr #= SocketAddress.of(#a, w.port);
@@ -155,31 +151,19 @@ public class WebFrontTest {
         AsyncWriter wr = heap AsyncWriter(sock);
 
         WebFrontTest.sendGet(wr, "/");
-        HttpResponse r0 #= WebFrontTest.readResponse(rd);
-        w.status0 = r0.statusCode();
-        String c0 #= WebFrontTest.ctypeOf(r0);
-        w.ctype0 = c0;
-        if (r0.hasBody) {
-            int32 bn = (int32) r0.body.count();
-            int8[] copy #= heap int8[bn];
-            int32 k = 0;
-            while (k < bn) {
-                copy[k] = r0.body[k];
-                k = k + 1;
-            }
-            String b0 = heap String(#copy, bn);
-            w.body0 = b0;
-        }
+        Got r0 #= WebFrontTest.readResponse(rd);
+        w.status0 = r0.status;
+        w.ctype0 = r0.ctype;
+        w.body0 = r0.body;
 
         WebFrontTest.sendGet(wr, "/app.js");
-        HttpResponse r1 #= WebFrontTest.readResponse(rd);
-        w.status1 = r1.statusCode();
-        String c1 #= WebFrontTest.ctypeOf(r1);
-        w.ctype1 = c1;
+        Got r1 #= WebFrontTest.readResponse(rd);
+        w.status1 = r1.status;
+        w.ctype1 = r1.ctype;
 
         WebFrontTest.sendGet(wr, "/nope.txt");
-        HttpResponse r2 #= WebFrontTest.readResponse(rd);
-        w.status2 = r2.statusCode();
+        Got r2 #= WebFrontTest.readResponse(rd);
+        w.status2 = r2.status;
 
         sock.close();
         w.done = true;
@@ -195,8 +179,8 @@ public class WebFrontTest {
         AsyncReader rd = heap AsyncReader(sock);
         AsyncWriter wr = heap AsyncWriter(sock);
         WebFrontTest.sendGet(wr, "/");
-        HttpResponse r0 #= WebFrontTest.readResponse(rd);
-        w.status0 = r0.statusCode();
+        Got r0 #= WebFrontTest.readResponse(rd);
+        w.status0 = r0.status;
         int8[] one = heap int8[1];
         int32 n = 1;
         try {
