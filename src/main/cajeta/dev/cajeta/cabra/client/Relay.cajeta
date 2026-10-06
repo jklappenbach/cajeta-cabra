@@ -52,7 +52,7 @@ public final class Relay {
     public Relay(int32 port, String token, int64 session,
             #FileWriter out) {
         this.port = port;
-        this.token = token;
+        this.token #= token;
         this.session = session;
         this.out #= out;
         this.sock = null;

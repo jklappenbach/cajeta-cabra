@@ -101,7 +101,7 @@ public final class Host implements TokenSink {
             int32 maxSessions, int64 idleExpiryMs) {
         this.engine #= engine;
         this.reg = heap SessionRegistry(maxSessions, idleExpiryMs);
-        this.token = token;
+        this.token #= token;
         this.state = "ready";
         this.maxConns = maxConns;
         this.conns #= heap WsConn[maxConns];

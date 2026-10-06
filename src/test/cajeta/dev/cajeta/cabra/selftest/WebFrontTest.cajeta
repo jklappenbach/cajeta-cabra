@@ -153,13 +153,13 @@ public class WebFrontTest {
         WebFrontTest.sendGet(wr, "/");
         Got r0 #= WebFrontTest.readResponse(rd);
         w.status0 = r0.status;
-        w.ctype0 = r0.ctype;
-        w.body0 = r0.body;
+        w.ctype0 #= r0.ctype;
+        w.body0 #= r0.body;
 
         WebFrontTest.sendGet(wr, "/app.js");
         Got r1 #= WebFrontTest.readResponse(rd);
         w.status1 = r1.status;
-        w.ctype1 = r1.ctype;
+        w.ctype1 #= r1.ctype;
 
         WebFrontTest.sendGet(wr, "/nope.txt");
         Got r2 #= WebFrontTest.readResponse(rd);
@@ -228,7 +228,7 @@ public class WebFrontTest {
                 r.chunks = r.chunks + 1;
             } else if (o.containsKey("done")) {
                 String f #= o.get("finish").asString();
-                r.finish = f;
+                r.finish #= f;
                 break;
             }
         }

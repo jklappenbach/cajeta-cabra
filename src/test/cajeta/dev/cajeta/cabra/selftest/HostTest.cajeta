@@ -132,7 +132,7 @@ public class HostTest {
                 cr.acc = cr.acc + ctext;
             } else if (o.containsKey("done")) {
                 String f #= o.get("finish").asString();
-                cr.finish = f;
+                cr.finish #= f;
                 break;
             }
         }
@@ -276,7 +276,7 @@ public class HostTest {
             + "[{\"role\":\"user\",\"content\":\"hi\"}],\"n\":2}");
         String rep #= HostTest.recvText(ws);
         if (rep != null) {
-            cr.acc = rep;
+            cr.acc #= rep;
         }
         ws.send("{\"op\":\"shutdown\"}");
         Fiber.sleep(Duration.ofMillis(200L));
@@ -432,7 +432,7 @@ public class HostTest {
             if (o.containsKey("error")) {
                 if (id == 13L) {
                     String k #= o.get("kind").asString();
-                    qr.errKind13 = k;
+                    qr.errKind13 #= k;
                 }
                 if (id == 12L) {
                     // A refusal of 12 is a queue that is NOT there —
@@ -447,10 +447,10 @@ public class HostTest {
             } else if (o.containsKey("done")) {
                 String f #= o.get("finish").asString();
                 if (id == 11L) {
-                    qr.finish11 = f;
+                    qr.finish11 #= f;
                 }
                 if (id == 12L) {
-                    qr.finish12 = f;
+                    qr.finish12 #= f;
                 }
             }
             if (qr.finish11.byteLength() > 0

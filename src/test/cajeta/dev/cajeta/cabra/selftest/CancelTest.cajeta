@@ -156,7 +156,7 @@ public class CancelTest {
                 cr.acc = cr.acc + ctext;
             } else if (o.containsKey("done")) {
                 String f #= o.get("finish").asString();
-                cr.finish = f;
+                cr.finish #= f;
                 break;
             }
         }
@@ -208,7 +208,7 @@ public class CancelTest {
         JsonObject fo = fv.object();
         if (fo.containsKey("kind") && fo.get("id").asInt64() == 2L) {
             String k #= fo.get("kind").asString();
-            cr.foreignErrKind = k;
+            cr.foreignErrKind #= k;
         }
 
         ws.send("{\"op\":\"generate\",\"id\":7,\"session\":" + cr.session
@@ -230,7 +230,7 @@ public class CancelTest {
                 }
             } else if (o.containsKey("done")) {
                 String f #= o.get("finish").asString();
-                cr.finish = f;
+                cr.finish #= f;
                 break;
             }
         }

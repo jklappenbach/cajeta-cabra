@@ -86,7 +86,7 @@ public final class Serve implements TokenSink {
         this.sink #= sink;
         this.out = heap JsonLinesWriter(this.sink);
         this.tpl = null;
-        this.modelPath = modelPath;
+        this.modelPath #= modelPath;
         this.state = "ready";
         this.ctx = ctx;
         this.cap = 32;
@@ -119,7 +119,7 @@ public final class Serve implements TokenSink {
     /** Health state the `health` op reports. Main flips this to "ready"
      *  once the engine is up. */
     public void setState(String s) {
-        this.state = s;
+        this.state #= s;
         return;
     }
 

@@ -71,7 +71,7 @@ public class ClientTest {
         EngineOptions opts = heap EngineOptions(ConcurrencyTest.TOY);
         opts.ctx = 256;
         opts.maxSeqs = maxSeqs;
-        opts.kvStore = storePath;
+        opts.kvStore #= storePath;
         return #LlmEngine.load(#opts);
     }
 

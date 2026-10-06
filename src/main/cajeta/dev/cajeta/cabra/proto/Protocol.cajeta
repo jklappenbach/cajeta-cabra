@@ -50,7 +50,7 @@ public final class Protocol {
             return #r;
         }
         String op #= opv.asString();
-        r.op = op;
+        r.op #= op;
 
         JsonValue sv0 = o.get("session");
         if (sv0 != null && sv0.kind() == JsonValue.NUMBER) {
@@ -62,7 +62,7 @@ public final class Protocol {
             JsonValue tv0 = o.get("token");
             if (tv0 != null && tv0.kind() == JsonValue.STRING) {
                 String tk #= tv0.asString();
-                r.token = tk;
+                r.token #= tk;
             }
             r.ok = true;
             return #r;
@@ -80,7 +80,7 @@ public final class Protocol {
                 return #r;
             }
             String p #= pv.asString();
-            r.prompt = p;
+            r.prompt #= p;
         } else if (op.equals("chat")) {
             JsonValue mv = o.get("messages");
             if (mv == null || mv.kind() != JsonValue.ARRAY) {
@@ -89,7 +89,7 @@ public final class Protocol {
             }
             int8[] mb #= Json.toBytes(mv);
             String ms = heap String(#mb, (int32) mb.count());
-            r.messagesRaw = ms;
+            r.messagesRaw #= ms;
         } else {
             r.err = "unknown op \"" + op + "\"";
             return #r;

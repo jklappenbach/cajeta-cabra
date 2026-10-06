@@ -177,7 +177,7 @@ public class DiagForwardTest {
                 }
             } else if (o.containsKey("done")) {
                 String f #= o.get("finish").asString();
-                r.finish = f;
+                r.finish #= f;
                 done = true;
                 // Anything still queued for us would arrive now; give
                 // it a moment so a late line is COUNTED, not missed.

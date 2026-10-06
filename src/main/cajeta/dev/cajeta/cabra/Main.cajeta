@@ -98,10 +98,10 @@ public final class Main {
         opts.ctx = ctx;
         opts.maxSeqs = maxSeqs;
         if (!device.equals("")) {
-            opts.device = device;
+            opts.device #= device;
         }
         if (!kvStore.equals("")) {
-            opts.kvStore = kvStore;
+            opts.kvStore #= kvStore;
         }
         return #LlmEngine.load(#opts);
     }

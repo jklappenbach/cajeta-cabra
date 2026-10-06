@@ -20,7 +20,7 @@
 
     "details": {
         "name":               "dev.cajeta.cabra",
-        "version":            "0.1.0",
+        "version":            "0.1.1",
         "description":        "cabra — resident-model LLM serving harness: load once, prompt many, stream responses, stop on the model's EOG set",
         "license":            "Apache-2.0",
         "authors":            ["Julian Klappenbach"],
@@ -42,19 +42,19 @@
         // depend on a logging backend — picking one is the embedder's
         // job, and cabra is the embedder.
         "dependencies": {
-            "dev.cajeta.llm": "0.1.0",
-            "dev.cajeta.logging": "0.8.1",
-            "dev.cajeta.http": "0.4.0"
+            "dev.cajeta.llm": "0.1.1",
+            "dev.cajeta.logging": "0.8.3",
+            "dev.cajeta.http": "0.5.0"
         },
 
         "dev-dependencies": {
-            "dev.cajeta.unit": "0.3.2"
+            "dev.cajeta.unit": "0.3.3"
         },
 
-        // llm 0.1.0 pins codec 0.8.2 and http 0.4.0 pins 0.8.3, which carry
-        // the same code. One codec for the graph until llm moves to 0.8.3.
+        // llm 0.1.1 and http 0.5.0 both pin codec 0.8.4. The override keeps
+        // one codec for the graph if a future dep pin drifts.
         "overrides": {
-            "dev.cajeta.codec": "0.8.3"
+            "dev.cajeta.codec": "0.8.4"
         },
 
         "repositories": [
