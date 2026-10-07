@@ -7,6 +7,7 @@
 # cabra.json carries no version pin run-tests.sh could fetch them by.
 # So this gate clones those two at their pegged tags and lets run-tests.sh
 # build them. llm, http, logging and unit resolve from Olla at cabra's pins.
+# llm is also cloned at its pin, for the toy.gguf test fixture only.
 # It is gating ONLY — build + full suite on every
 # main push, NO tag path and NO publish (the app-release that packages the exe
 # + web/dist rides cabra unit 12, where the primavera dependency lands too).
@@ -37,8 +38,15 @@ jobs:
 
       # llm, http, logging and unit resolve from Olla at cajeta.json's pins.
       # jinja has no pin there and codec's native zlib is a build artifact,
-      # so those two are cloned at the tags llm 0.1.2 pegs. Raise these refs
-      # with the pins.
+      # so those two are cloned at the tags llm 0.1.2 pegs. The tests load
+      # toy.gguf from ../cajeta-llm, so llm is cloned at its pin for fixtures
+      # only. Raise these refs with the pins.
+      - name: Check out cajeta-llm (test fixtures)
+        uses: actions/checkout@v4
+        with:
+          repository: jklappenbach/cajeta-llm
+          ref: v0.1.2
+          path: cajeta-llm
       - name: Check out cajeta-codec
         uses: actions/checkout@v4
         with:
@@ -106,4 +114,6 @@ jobs:
           # codec's native out of the Olla .cja; run-tests.sh emits an exe
           # and needs it explicitly.)
           CAJETA_NATIVE_PATH: ${{ github.workspace }}/cajeta-codec/native
+          # The llm checkout is fixtures only. The engine is the Olla archive.
+          LLM_REPO: ${{ github.workspace }}/no-llm-build
         run: ./run-tests.sh
