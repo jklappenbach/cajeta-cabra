@@ -5,13 +5,11 @@
 # the libraries use, because it also builds and tests the web client, and
 # codec / jinja are only TRANSITIVE deps here (pulled in by llm/http), so
 # cabra.json carries no version pin run-tests.sh could fetch them by.
-# So this gate clones those siblings and lets run-tests.sh build them, exactly
-# as a local checkout does. (unit is a pinned dev-dep and resolves from Olla.) It is gating ONLY — build + full suite on every
+# So this gate clones those two at their pegged tags and lets run-tests.sh
+# build them. llm, http, logging and unit resolve from Olla at cabra's pins.
+# It is gating ONLY — build + full suite on every
 # main push, NO tag path and NO publish (the app-release that packages the exe
 # + web/dist rides cabra unit 12, where the primavera dependency lands too).
-#
-# llm, http and logging are on Olla at cabra's pins since 2026-10-03, so most
-# of this could collapse into the shared lib-release workflow.
 #
 # No pull_request trigger by design — this repo lands changes by pushing
 # straight to main (the fleet convention), so main-push CI is the only thing
@@ -28,49 +26,30 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Toolchain floor: the release this tree was built and its suite run
-      # against locally (v0.35.0, 56 passed, 2026-10-06). Raise it the way the libraries do: verify
+      # against locally (v0.36.0, 56 passed, 2026-10-07). Raise it the way the libraries do: verify
       # the tree builds + the suite passes under the new pin, then move it.
-      CAJETA_VERSION: v0.35.0
+      CAJETA_VERSION: v0.36.0
     steps:
       - name: Check out cabra
         uses: actions/checkout@v4
         with:
           path: cabra
 
-      # The three deps that are NOT resolvable from Olla at cabra's pins.
-      # run-tests.sh finds them as siblings of the cabra checkout and builds
-      # each into a .cja; unit / codec / jinja resolve from Olla and need no
-      # checkout. Pinned to each repo's main — the same thing a local dev tree
-      # holds.
-      - name: Check out cajeta-llm
-        uses: actions/checkout@v4
-        with:
-          repository: jklappenbach/cajeta-llm
-          path: cajeta-llm
-      - name: Check out cajeta-http
-        uses: actions/checkout@v4
-        with:
-          repository: jklappenbach/cajeta-http
-          path: cajeta-http
-      - name: Check out cajeta-logging
-        uses: actions/checkout@v4
-        with:
-          repository: jklappenbach/cajeta-logging
-          path: cajeta-logging
-      # codec and jinja ARE on Olla, but cabra declares them only
-      # transitively (through llm/http), so run-tests.sh has no version
-      # pin to request them by — it only finds them as siblings. Clone
-      # them too, mirroring a local tree. (unit IS a pinned dev-dep, so
-      # it resolves from Olla without a checkout.)
+      # llm, http, logging and unit resolve from Olla at cajeta.json's pins.
+      # jinja has no pin there and codec's native zlib is a build artifact,
+      # so those two are cloned at the tags llm 0.1.2 pegs. Raise these refs
+      # with the pins.
       - name: Check out cajeta-codec
         uses: actions/checkout@v4
         with:
           repository: jklappenbach/cajeta-codec
+          ref: v0.8.5
           path: cajeta-codec
       - name: Check out cajeta-jinja
         uses: actions/checkout@v4
         with:
           repository: jklappenbach/cajeta-jinja
+          ref: v0.1.4
           path: cajeta-jinja
 
       # Same install the shared lib-release workflow uses: the toolchain .deb
@@ -112,7 +91,7 @@ jobs:
           npm run build
           npm test
 
-      # The cabra suite. run-tests.sh builds the sibling deps (llm/http/logging)
+      # The cabra suite. run-tests.sh builds the codec and jinja checkouts
       # and resolves the rest from Olla, then runs the tests on the cpu backend.
       # The ownership-migration switches stay warn-first, as locally.
       - name: Build + test cabra
