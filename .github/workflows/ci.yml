@@ -27,9 +27,9 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Toolchain floor: the release this tree was built and its suite run
-      # against locally (v0.36.0, 56 passed, 2026-10-07). Raise it the way the libraries do: verify
+      # against locally (v0.38.0, 56 passed, 2026-10-09). Raise it the way the libraries do: verify
       # the tree builds + the suite passes under the new pin, then move it.
-      CAJETA_VERSION: v0.36.0
+      CAJETA_VERSION: v0.38.0
     steps:
       - name: Check out cabra
         uses: actions/checkout@v4
@@ -38,20 +38,20 @@ jobs:
 
       # llm, http, logging and unit resolve from Olla at cajeta.json's pins.
       # jinja has no pin there and codec's native zlib is a build artifact,
-      # so those two are cloned at the tags llm 0.1.2 pegs. The tests load
+      # so those two are cloned from their tags. The tests load
       # toy.gguf from ../cajeta-llm, so llm is cloned at its pin for fixtures
       # only. Raise these refs with the pins.
       - name: Check out cajeta-llm (test fixtures)
         uses: actions/checkout@v4
         with:
           repository: jklappenbach/cajeta-llm
-          ref: v0.1.2
+          ref: v0.1.3
           path: cajeta-llm
       - name: Check out cajeta-codec
         uses: actions/checkout@v4
         with:
           repository: jklappenbach/cajeta-codec
-          ref: v0.8.5
+          ref: v0.8.6
           path: cajeta-codec
       - name: Check out cajeta-jinja
         uses: actions/checkout@v4
