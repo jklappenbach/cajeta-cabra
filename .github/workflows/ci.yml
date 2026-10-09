@@ -57,7 +57,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: jklappenbach/cajeta-jinja
-          ref: v0.1.4
+          ref: v0.1.5
           path: cajeta-jinja
 
       # Same install the shared lib-release workflow uses: the toolchain .deb
