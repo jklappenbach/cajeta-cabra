@@ -447,34 +447,49 @@ Phase 4 was waiting for. This section is the contract from cabra's side;
 primavera's own spec owns the framework.
 
 - **11.1 Sessions are primavera sessions.** cabra's session (§5.2) is a
-  primavera `SessionScope` entry: id issuance, idle expiry on a
-  `TimeSource`, explicit close, and the three-valued lookup
-  (open / gone / unknown) that §5.2.5 needs. `SessionRegistry` is
+  primavera `SessionStore` entry: store-issued ids, idle expiry on a
+  `TimeSource`, explicit close, the three-valued lookup (open / gone /
+  unknown) that §5.2.5 needs, a capacity cap, and an eviction observer that
+  returns the KV slot to the pool. These are primavera 0.4.0
+  (`cajeta/specs/primavera-live-sessions-spec.md`). `SessionRegistry` is
   retired in favour of it; the §5.2 use cases and their tests are the
   acceptance bar and must pass unchanged.
-- **11.2 A turn is a request.** Each protocol message is handled inside a
-  primavera request scope, so request-scoped components (the parsed
-  request, the session, the emitter for that turn) resolve by injection
-  rather than by parameter threading. Scope propagates correctly across
-  the fiber handoffs the host already makes (accept → reader → host loop
-  → writer).
-- **11.3 The HTTP surface is declared, not hand-routed.** §10.1's static
-  route, `/ws`, `health`, and any later REST endpoint are `@Rest`
-  handlers on a `@RestServer`; serde to and from the typed `Req` model
-  is primavera's. The raw accept loop in `ws/Host` is replaced by
-  cajeta-http's `HttpServer` + `Router` under primavera policy.
+- **11.2 A turn is an explicit object (Julian, 2026-10-16).** Each
+  protocol message is handled in primavera's `Message` scope on its
+  connection. A generation turn outlives that message and crosses fibers
+  (host loop → writer), so cabra creates a `Turn` (request, session,
+  emitter) per generation and passes it to the fibers it starts. No
+  ambient request scope crosses fibers; primavera is not asked for one.
+- **11.3 The HTTP surface is declared, not hand-routed (Julian,
+  2026-10-16: typed Endpoints, not `@Rest`).** `health` and any later REST
+  endpoint are typed primavera `Endpoints`; §10.1's client is a static
+  directory mount; `/ws` is a `WebSocketEndpoints` path with open and
+  close hooks. The raw accept loop in `ws/Host` is replaced by primavera's
+  `WebServer`.
 - **11.4 Components.** The engine, the chat template, the token
-  credential and the diagnostic bridge are components with declared
+  credential and the `DiagnosticBridge` are components with declared
   lifecycle; tests assemble a cabra from the same graph with a scripted
   engine, which is what unit 6's `MemChannel` tests do today by hand.
 - **11.5 Nothing the user can see changes.** The op set, session ids,
   error kinds, and both transports behave byte-for-byte as before
   (units 6–8's tests are the regression bar); only the assembly does.
-- **11.6 primavera Phase 4 ships from this work.** What cabra needs and
-  primavera lacks (request-scope binding at the handler boundary, the
-  `@Rest` routing and serde, the session store over `HttpServer`) is
-  built in primavera, spec'd there, and released; cabra pins the
-  release. cabra carries no framework code of its own.
+- **11.6 primavera ships what cabra needs first.** What cabra needs and
+  primavera lacks is `primavera-live-sessions`: issued sessions, WebSocket
+  lifecycle hooks, a byte-bounded send queue and a static mount, released
+  as primavera 0.4.0 on cajeta-http 0.6.0 ahead of request-dispatch
+  (Julian, 2026-10-16). cabra pins it and carries no framework code of
+  its own.
+- **11.6.1 A slow client (Julian, 2026-10-16).** Output to a client that
+  reads slowly stays buffered and is sent as it reads. The buffer is
+  bounded in bytes; a send past the bound closes that connection (1008)
+  and leaves its sessions open, so the client reconnects and resumes by
+  id (§5.2.2). This is cabra's behaviour today (`ws/Host` sheds the
+  connection), now with a byte bound rather than a message count.
+- **11.6.2 Engine-side multiplexing.** The draft `llm-serving` spec would
+  move session multiplexing into the engine. cabra proceeds without
+  waiting on it and keeps its sessions behind one interface, so an
+  engine-side multiplexer can replace them if that spec is approved
+  (Julian, 2026-10-16).
 - **11.7 Enterprise features follow, not lead (Julian, 2026-09-02).**
   "We'll add to primavera what we need." What cabra wants from primavera
   is its session model and a security model enterprise users would

@@ -625,9 +625,10 @@ spawning frame. Measured, three shapes.
 
 ## 12. primavera
 
-*Satisfies spec §11. Depends on unit 11. Second on the focus stack.
-Most of the code lands in cajeta-primavera (its Phase 4); this unit is
-the cabra side plus the primavera work cabra forces.*
+*Satisfies spec §11. Depends on unit 11 and on primavera 0.4.0
+(`cajeta/agents/primavera-live-sessions-plan.md`). Revised 2026-10-16 for
+Julian's decisions: typed Endpoints, not `@Rest`; an explicit `Turn`, not
+fiber-crossing request scope; a byte-bounded send queue.*
 
 ### 12.1 TDD
 - [ ] 12.1.1 Units 6–8's suites pass unchanged against the primavera
@@ -636,22 +637,33 @@ the cabra side plus the primavera work cabra forces.*
 - [ ] 12.1.2 Session expiry under a `ManualTimeSource`: open, advance past
       idle, `session_gone`; touch before expiry keeps it (§5.2.4, now
       primavera's clock).
-- [ ] 12.1.3 Request scope crosses the host's fiber handoffs: a
-      request-scoped component resolved in the reader is the same instance
-      in the host loop and the writer for that message, and different
-      across concurrent messages.
-- [ ] 12.1.4 The `@Rest` surface: `GET /health` returns the health object
-      via serde; the static route and `/ws` are declared routes.
+- [ ] 12.1.3 A `Turn` carries one generation across the host loop and the
+      writer: two concurrent turns on one connection, each in its own
+      session, emit only their own chunks, byte-equal to their solos; a
+      session-scoped component resolved for a turn is that session's
+      instance.
+- [ ] 12.1.4 The declared surface: `GET /health` is a typed `Endpoints`
+      route returning the health object; `web/dist` is a static mount
+      (`/` → `index.html`, a missing asset 404); `/ws` is a
+      `WebSocketEndpoints` path.
+- [ ] 12.1.5 A client that stops reading: the other session's turn
+      finishes byte-equal to its solo (7.1.6's bar); past the byte bound
+      the slow connection closes with 1008, its session stays OPEN, and a
+      reconnect resumes it by id (spec §11.6.1).
+- [ ] 12.1.6 Capacity and expiry through primavera: at capacity `open`
+      answers `kind: capacity`; an expired or closed session's KV slot
+      returns to the pool through the eviction observer.
 
 ### 12.2 Coding
-- [ ] 12.2.1 primavera Phase 4 (in cajeta-primavera, its own spec/plan):
-      request-scope binding at the `HttpServer` handler boundary;
-      `@RestServer`/`@Rest` routing with typed serde; `SessionStore` over
-      the server. Released; cabra pins it.
-- [ ] 12.2.2 cabra: `SessionRegistry` → primavera `SessionScope`;
-      `ws/Host` accept loop → `HttpServer` + `Router`; components for
-      engine / template / credential / diag bridge; `Main` assembles the
-      graph.
+- [ ] 12.2.1 Pin primavera 0.4.0 (primavera-live-sessions, released from
+      cajeta-primavera on cajeta-http 0.6.0).
+- [ ] 12.2.2 cabra: `SessionRegistry` → primavera `SessionStore` (issued
+      ids, capacity, the eviction observer freeing the KV slot); `ws/Host`
+      accept loop → primavera `WebServer` with typed `Endpoints`, the
+      static mount and a `WebSocketEndpoints` path whose close hook ends
+      the connection's turns' output; a `Turn` per generation; components
+      for engine / template / credential / `DiagnosticBridge`; `Main`
+      assembles the graph.
 - [ ] 12.2.3 `docs/architecture.md`: cabra as a primavera application.
 
 ### 12.3 Acceptance
