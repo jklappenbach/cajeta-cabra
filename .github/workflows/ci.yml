@@ -27,9 +27,12 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # Toolchain floor: the release this tree was built and its suite run
-      # against locally (v0.39.0, 56 passed, 2026-10-10). Raise it the way the libraries do: verify
-      # the tree builds + the suite passes under the new pin, then move it.
-      CAJETA_VERSION: v0.39.0
+      # against locally. Raise it the way the libraries do: verify the tree
+      # builds + the suite passes under the new pin, then move it.
+      # v0.39.0: 56 passed, 2026-10-10. v0.44.0 (the first without the stdlib
+      # crypto, so http 0.9.0 and crypto 0.1.0): 56 passed, 0 failed, 2
+      # skipped, both from sibling checkouts and from Olla, 2026-10-19.
+      CAJETA_VERSION: v0.44.0
     steps:
       - name: Check out cabra
         uses: actions/checkout@v4

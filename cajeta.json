@@ -44,17 +44,19 @@
         "dependencies": {
             "dev.cajeta.llm": "0.1.4",
             "dev.cajeta.logging": "0.8.6",
-            "dev.cajeta.http": "0.5.3"
+            "dev.cajeta.http": "0.9.0"
         },
 
         "dev-dependencies": {
             "dev.cajeta.unit": "0.3.6"
         },
 
-        // llm 0.1.4 and http 0.5.3 both pin codec 0.8.7. The override keeps
-        // one codec for the graph if a future dep pin drifts.
+        // llm 0.1.4 and http 0.9.0 both pin codec 0.8.7, and http 0.9.0 pins
+        // crypto 0.1.0. The overrides keep one of each for the graph if a
+        // future dep pin drifts; run-tests.sh fetches crypto at this pin.
         "overrides": {
-            "dev.cajeta.codec": "0.8.7"
+            "dev.cajeta.codec": "0.8.7",
+            "dev.cajeta.crypto": "0.1.0"
         },
 
         "repositories": [

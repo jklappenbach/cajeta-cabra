@@ -90,9 +90,20 @@ resolve() {
             || { echo "$name: build produced no artifact under $repo" >&2; exit 1; }
         RESOLVED="$cja"; return
     fi
-    ver="$(sed -n 's/.*"'"${name//./\\.}"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' \
-        "$here/cajeta.json" | head -1)"
+    ver="$(pin_in "$here/cajeta.json" "$name")"
     [[ -n "$ver" ]] || { echo "no $name pin in cajeta.json" >&2; exit 1; }
+    fetch_pinned "$name" "$ver"
+}
+
+# pin_in <cajeta.json> <name> — the version that manifest pins <name> at, or "".
+pin_in() {
+    sed -n 's/.*"'"${2//./\\.}"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$1" | head -1
+}
+
+# fetch_pinned <name> <version> — sets RESOLVED to that published archive,
+# from the $OLLA_HOME store or the registry.
+fetch_pinned() {
+    local name="$1" ver="$2" cja
     cja="$OLLA_HOME/$name/$ver/$name-$ver.cja"
     [[ -f "$cja" ]] && { RESOLVED="$cja"; return; }
     cja="$here/build/.dep-cache/$name-$ver.cja"
@@ -116,7 +127,18 @@ resolve dev.cajeta.jinja "${JINJA_REPO:-$here/../cajeta-jinja}"; jinja_cja="$RES
 # The backend the engine's DiagSink seam is bridged onto (LoggingDiagSink).
 resolve dev.cajeta.logging "${LOGGING_REPO:-$here/../cajeta-logging}"; logging_cja="$RESOLVED"
 # Host mode (unit 7): the WebSocket stack.
-resolve dev.cajeta.http "${HTTP_REPO:-$here/../cajeta-http}"; http_cja="$RESOLVED"
+HTTP_REPO="${HTTP_REPO:-$here/../cajeta-http}"
+resolve dev.cajeta.http "$HTTP_REPO"; http_cja="$RESOLVED"
+# http 0.9.0 and later take TLS and the digests from dev.cajeta.crypto, at the
+# version http itself pins: the checkout's manifest when http was built from
+# one, and otherwise the published http's (cabra's own pin matches it). Always
+# the published archive, never a crypto checkout: only a published .cja bakes
+# the cajeta_crypto shim for every platform.
+http_manifest="$here/cajeta.json"
+[[ -d "$HTTP_REPO" ]] && http_manifest="$HTTP_REPO/cajeta.json"
+crypto_ver="$(pin_in "$http_manifest" dev.cajeta.crypto)"
+[[ -n "$crypto_ver" ]] || { echo "no dev.cajeta.crypto pin in $http_manifest" >&2; exit 1; }
+fetch_pinned dev.cajeta.crypto "$crypto_ver"; crypto_cja="$RESOLVED"
 echo ">> unit: $unit_cja"
 echo ">> codec: $codec_cja"
 echo ">> jinja: $jinja_cja"
@@ -147,12 +169,12 @@ echo ">> engine: $llm_cja"
 # a source tree; a hard error in the compiler as of c963d19b.)
 echo ">> building cabra library .cja"
 "$CAJETA" --emit=cja -o "$out/cabra.cja" \
-    --classpath="$llm_cja,$codec_cja,$jinja_cja,$logging_cja,$http_cja" \
+    --classpath="$llm_cja,$codec_cja,$jinja_cja,$logging_cja,$http_cja,$crypto_cja" \
     dev.cajeta.cabra.Main.main "$here/src/main/cajeta" "$out" >/dev/null
 
 echo ">> building + running the cabra test binary"
 "$CAJETA" --emit=exe --profile=test --xpu-backend="$XPU_BACKEND" \
-    --classpath="$out/cabra.cja,$llm_cja,$unit_cja,$codec_cja,$jinja_cja,$logging_cja,$http_cja" \
+    --classpath="$out/cabra.cja,$llm_cja,$unit_cja,$codec_cja,$jinja_cja,$logging_cja,$http_cja,$crypto_cja" \
     -o "$out/cabratests" \
     dev.cajeta.cabra.selftest.TestMain.run \
     "$here/src/test/cajeta" "$out" >/dev/null
