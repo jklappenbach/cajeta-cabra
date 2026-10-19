@@ -48,7 +48,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: jklappenbach/cajeta-llm
-          ref: v0.1.4
+          ref: v0.1.5
           path: cajeta-llm
       - name: Check out cajeta-codec
         uses: actions/checkout@v4
