@@ -655,8 +655,13 @@ fiber-crossing request scope; a byte-bounded send queue.*
       returns to the pool through the eviction observer.
 
 ### 12.2 Coding
-- [ ] 12.2.1 Pin primavera 0.4.0 (primavera-live-sessions, released from
-      cajeta-primavera on cajeta-http 0.6.0).
+- [ ] 12.2.1 Pin primavera 0.5.0 (primavera-live-sessions). Released
+      2026-10-20 on cajeta v0.44.0, http 0.9.0, cloud 0.4.0 and crypto 0.1.0;
+      on Olla as sha256:f8c5bd41…, signed release-1 (0.4.0 was the crypto
+      move, so live sessions shipped as 0.5.0). Its CHANGELOG.md has the
+      migration notes. Websocket queues are bounded in bytes
+      (`WebSocketEndpoints.queueBytes`); the static mount is
+      `Endpoints.staticDir(prefix, dir)` and needs a security rule.
 - [ ] 12.2.2 cabra: `SessionRegistry` → primavera `SessionStore` (issued
       ids, capacity, the eviction observer freeing the KV slot); `ws/Host`
       accept loop → primavera `WebServer` with typed `Endpoints`, the
