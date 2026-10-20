@@ -661,7 +661,7 @@ fiber-crossing request scope; a byte-bounded send queue.*
       move, so live sessions shipped as 0.5.0). Its CHANGELOG.md has the
       migration notes. Websocket queues are bounded in bytes
       (`WebSocketEndpoints.queueBytes`); the static mount is
-      `Endpoints.staticDir(prefix, dir)` and needs a security rule.
+      `Endpoints.staticDir(prefix, dir)`, and under WebSecurity it needs a rule.
 - [ ] 12.2.2 cabra: `SessionRegistry` → primavera `SessionStore` (issued
       ids, capacity, the eviction observer freeing the KV slot); `ws/Host`
       accept loop → primavera `WebServer` with typed `Endpoints`, the
