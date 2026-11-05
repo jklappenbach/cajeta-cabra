@@ -105,9 +105,13 @@ jobs:
       # The cabra suite. run-tests.sh builds the codec and jinja checkouts
       # and resolves the rest from Olla, then runs the tests on the cpu backend.
       # The ownership-migration switches stay warn-first, as locally.
+      # 60 minutes, not 30: llm 0.1.6 makes the cpu build lower its GPU
+      # cooperative-matrix GEMMs to the software tile, which tripled the
+      # build (11 min on 0.1.5, past 30 on 0.1.6). Back to 30 once llm holds
+      # those kernels off the cpu backend.
       - name: Build + test cabra
         working-directory: cabra
-        timeout-minutes: 30
+        timeout-minutes: 60
         env:
           # The test exe links codec's native zlib backend
           # (libcajeta_zlib). It is not on the runner's ~/.cajeta/native,
