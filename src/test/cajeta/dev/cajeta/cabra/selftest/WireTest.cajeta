@@ -1,0 +1,71 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.proto.Wire;
+
+/**
+ * The exact bytes `Wire` emits. The streamed lines are built once per
+ * token, so their builders write each line into one exact-size buffer;
+ * these pin that the bytes are the ones the transports have always sent
+ * (the byte-equality bars in HostTest and ClientTest rest on them).
+ */
+public class WireTest {
+
+    public WireTest() { return; }
+
+    @Test
+    public void aPlainChunk() {
+        String m #= Wire.chunk(7L, "hello");
+        Assert.equals("{\"id\":7,\"chunk\":\"hello\"}", m);
+    }
+
+    @Test
+    public void aChunkEscapesQuotesBackslashesAndControlBytes() {
+        String m #= Wire.chunk(12L, "a\"b\\c\nd\re\tf\u0001g");
+        Assert.equals("{\"id\":12,\"chunk\":\"a\\\"b\\\\c\\nd\\re\\tf\\u0001g\"}", m);
+    }
+
+    @Test
+    public void aChunkKeepsMultibyteUtf8AsIs() {
+        String m #= Wire.chunk(3L, "café 中");
+        Assert.equals("{\"id\":3,\"chunk\":\"café 中\"}", m);
+    }
+
+    @Test
+    public void anEmptyChunkAndANegativeId() {
+        String m #= Wire.chunk(0L - 5L, "");
+        Assert.equals("{\"id\":-5,\"chunk\":\"\"}", m);
+    }
+
+    @Test
+    public void aChunkCutFromALargerString() {
+        String whole = "xxhelloyy";
+        String part #= whole.substring(2, 7);
+        String m #= Wire.chunk(1L, part);
+        Assert.equals("{\"id\":1,\"chunk\":\"hello\"}", m);
+    }
+
+    @Test
+    public void aDiagLine() {
+        String m #= Wire.diag(4L, "{\"route\":\"tile\"}");
+        Assert.equals("{\"id\":4,\"diag\":{\"route\":\"tile\"}}", m);
+    }
+
+    @Test
+    public void aDoneLineAndItsUsageForm() {
+        String d #= Wire.done(9L, "eos");
+        Assert.equals("{\"id\":9,\"done\":true,\"finish\":\"eos\"}", d);
+        String u #= Wire.doneUsage(9L, "budget", 47L, 8L, 16L, 50L);
+        Assert.equals("{\"id\":9,\"done\":true,\"finish\":\"budget\",\"usage\":"
+            + "{\"prompt_tokens\":47,\"gen_tokens\":8,\"prefill_ms\":16,"
+            + "\"decode_ms\":50}}", u);
+    }
+
+    @Test
+    public void largeIdsKeepEveryDigit() {
+        String m #= Wire.chunk(9223372036854775807L, "z");
+        Assert.equals("{\"id\":9223372036854775807,\"chunk\":\"z\"}", m);
+    }
+}

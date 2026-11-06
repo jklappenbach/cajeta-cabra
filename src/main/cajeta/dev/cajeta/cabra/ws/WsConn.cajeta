@@ -24,6 +24,8 @@ import dev.cajeta.http.ws.WebSocket;
 import dev.cajeta.http.ws.WsMessage;
 import dev.cajeta.http.ws.WsServerHandshake;
 import dev.cajeta.cabra.io.LineReader;
+import dev.cajeta.cabra.proto.Protocol;
+import dev.cajeta.cabra.proto.Req;
 
 /**
  * One host-mode connection (plan 7.2.2): owns the socket, its buffered
@@ -34,13 +36,13 @@ import dev.cajeta.cabra.io.LineReader;
  * this connection's writer fiber pays the peer's slowness; past the
  * ring bound the connection is SHED (marked dead), not waited on.
  *
- * The reader fiber turns inbound frames into (connSlot) signals on the
- * host's shared channel — the LineReader pattern, one ring per
- * connection for inbound lines too.
+ * The reader fiber parses each inbound message in place, from the
+ * WebSocket's lent buffer, and hands the host an owned request: the
+ * message is never copied, and the buffer is free for the next frame as
+ * soon as the parse returns.
  */
 public final class WsConn {
 
-    static final int32 IN_CAP = 16;
     static final int32 OUT_CAP = 256;
     static final int32 OUT_BYTES = 65536;
 
@@ -52,10 +54,6 @@ public final class WsConn {
     AsyncReader rd;             // owned; borrowed by ws
     AsyncWriter wr;             // owned; borrowed by ws
     WebSocket ws;               // owned
-
-    // Inbound ring (reader fiber writes, host loop reads).
-    ArrayList<String> inSlots;
-    int32 inNext;
 
     // Outbound ring (host loop writes, writer fiber drains).
     Lock outMu;
@@ -79,18 +77,10 @@ public final class WsConn {
         this.rd = heap AsyncReader(this.sock);
         this.wr = heap AsyncWriter(this.sock);
         this.ws = null;
-        this.inSlots = heap ArrayList<String>();
-        int32 i = 0;
-        while (i < WsConn.IN_CAP) {
-            String e #= WsConn.cp("");
-            this.inSlots.add(#e);
-            i = i + 1;
-        }
-        this.inNext = 0;
         this.outMu = heap Lock();
         this.outReady = heap Semaphore(0);
         this.outSlots = heap ArrayList<String>();
-        i = 0;
+        int32 i = 0;
         while (i < WsConn.OUT_CAP) {
             String e2 #= WsConn.cp("");
             this.outSlots.add(#e2);
@@ -113,15 +103,15 @@ public final class WsConn {
 
     /** Host loop: enqueue one outbound message. False = the ring is
      *  full (a non-reading client) — the caller sheds the connection
-     *  rather than waiting (§5.3.2). */
+     *  rather than waiting (§5.3.2). A sink: the slot takes what was
+     *  handed over, so a transferred message is never copied. */
     public boolean enqueueOut(String m) {
         {
             LockGuard g #= this.outMu.acquire();
             if (this.outQueued >= WsConn.OUT_CAP) {
                 return false;
             }
-            String c #= WsConn.cp(m);
-            this.outSlots.set(this.outHead, #c);
+            this.outSlots.set(this.outHead, #m);
             this.outHead = (this.outHead + 1) % WsConn.OUT_CAP;
             this.outQueued = this.outQueued + 1;
         }
@@ -129,8 +119,25 @@ public final class WsConn {
         return true;
     }
 
+    /** Send `m` from its own bytes: a server frame without compression
+     *  goes straight to the socket writer. A string with no backing array
+     *  of its own (a literal) is sent through the copying form. */
+    static void sendInPlace(WebSocket ws, String m) {
+        int8[] root = m.root();
+        if (root == null) {
+            ws.send(m);
+            return;
+        }
+        ws.sendText(root, (int32) m.byteOffset(), m.byteLength());
+        return;
+    }
+
     /** The writer fiber: drain the ring into `ws.send`, absorbing the
-     *  peer's read pace so nobody else has to. */
+     *  peer's read pace so nobody else has to. It sends straight from the
+     *  tail slot and frees that slot only after the send returns: the host
+     *  writes only at the head while the count is below the bound, so the
+     *  slot being sent is never overwritten under it, and nothing copies
+     *  the message out. */
     public static async int32 writeLoop(WsConn c) {
         while (true) {
             c.outReady.acquire();
@@ -139,17 +146,20 @@ public final class WsConn {
             {
                 LockGuard g #= c.outMu.acquire();
                 if (c.outQueued > 0) {
-                    m #= WsConn.cp(c.outSlots.get(c.outTail));
-                    c.outTail = (c.outTail + 1) % WsConn.OUT_CAP;
-                    c.outQueued = c.outQueued - 1;
+                    m = c.outSlots.get(c.outTail);
                     have = true;
                 }
             }
             if (have) {
                 try {
-                    c.ws.send(m);
+                    WsConn.sendInPlace(c.ws, m);
                 } catch (Exception e) {
                     c.dead = true;
+                }
+                {
+                    LockGuard g3 #= c.outMu.acquire();
+                    c.outTail = (c.outTail + 1) % WsConn.OUT_CAP;
+                    c.outQueued = c.outQueued - 1;
                 }
             } else if (c.outStop) {
                 {
@@ -193,9 +203,11 @@ public final class WsConn {
         Task<int32> wt = spawn writeLoop(c);
         c.writeTask #= wt;
         while (!c.dead) {
+            // Lent, not received: the connection reuses one message, so
+            // nothing is copied, and it stays valid until the next call.
             WsMessage m = null;
             try {
-                m #= c.ws.receive();
+                m = c.ws.next();
             } catch (Exception e) {
                 // A dead peer is normal lifecycle, but it must never be
                 // SILENT — the 2026-08-31 wedge hid behind exactly this
@@ -211,13 +223,9 @@ public final class WsConn {
             if (!m.isText()) {
                 continue;
             }
-            String text #= m.text();
-            int32 s = c.inNext;
-            String owned #= WsConn.cp(text);
-            c.inSlots.set(s, #owned);
-            c.inNext = (c.inNext + 1) % WsConn.IN_CAP;
+            Req r #= Protocol.parseBytes(m.bytes(), m.length());
             // Backpressure parks THIS fiber if the host loop lags.
-            h.inbound(c.slot, s);
+            h.inbound(c.slot, #r);
         }
         c.dead = true;
         h.connGone(c.slot);
@@ -275,10 +283,6 @@ public final class WsConn {
     static void notFound(HttpResponse r) {
         r.status(404);
         return;
-    }
-
-    public String inLineAt(int32 s) {
-        return this.inSlots.get(s);
     }
 
     /** Force teardown: close the socket so a parked receive fails

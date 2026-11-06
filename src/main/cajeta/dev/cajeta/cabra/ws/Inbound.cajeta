@@ -1,0 +1,22 @@
+package dev.cajeta.cabra.ws;
+
+import dev.cajeta.cabra.proto.Req;
+
+/**
+ * One parsed request and the connection it came in on: what a reader fiber
+ * hands the host loop, and what the wait queue holds (plan 7.2.4). The
+ * reader parses the message in place from the WebSocket's lent buffer, so
+ * the request crosses fibers as this owned record and the message itself
+ * is never copied.
+ */
+public final class Inbound {
+
+    public int32 connSlot;
+    public Req req;             // owned
+
+    public Inbound(int32 connSlot, #Req req) {
+        this.connSlot = connSlot;
+        this.req #= req;
+        return;
+    }
+}

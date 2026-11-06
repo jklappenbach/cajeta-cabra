@@ -57,7 +57,7 @@ public final class Host implements TokenSink {
 
     int32 maxConns;
     WsConn[] conns;            // slot-indexed; null = free
-    Channel<int64> inCh;       // (connSlot << 16) | lineSlot
+    Channel<Inbound> inCh;     // parsed requests, owned, from the readers
     TcpListener listener;      // owned
     public int32 port;
     boolean stopping;
@@ -76,9 +76,10 @@ public final class Host implements TokenSink {
     boolean[] trDiag;          // §10.9: this request asked for records
     int32 idleSteps;
 
-    // 7.2.4: past in-flight capacity a request QUEUES (bounded FIFO of
-    // owned line copies); past the bound it is shed with an explicit
-    // busy error. Admission happens as reaping frees slots.
+    // 7.2.4: past in-flight capacity a request QUEUES (a bounded FIFO of
+    // the parsed requests themselves, moved, never copied); past the
+    // bound it is shed with an explicit busy error. Admission happens as
+    // reaping frees slots.
     ChatTemplate tpl;          // owned; null when the model ships none
     int32 ctxLimit;            // 0 = no admission guard
     String webDir;             // owned; null = no HTTP front (§10.1)
@@ -92,9 +93,7 @@ public final class Host implements TokenSink {
     int32 diagWanted;
 
     int32 queueBound;
-    ArrayList<String> qLine;
-    int32[] qConn;
-    int32 qHead;
+    Channel<Inbound> waitQ;    // null until first needed
     int32 qCount;
 
     public Host(#LlmEngine engine, String token, int32 maxConns,
@@ -105,7 +104,7 @@ public final class Host implements TokenSink {
         this.state = "ready";
         this.maxConns = maxConns;
         this.conns #= heap WsConn[maxConns];
-        this.inCh = heap Channel<int64>(64);
+        this.inCh = heap Channel<Inbound>(64);
         this.listener = null;
         this.port = 0;
         this.stopping = false;
@@ -128,9 +127,7 @@ public final class Host implements TokenSink {
         this.ctxLimit = 0;
         this.webDir = null;
         this.queueBound = 8;
-        this.qLine = null;
-        this.qConn = null;
-        this.qHead = 0;
+        this.waitQ = null;
         this.qCount = 0;
         this.engine.setSink(this);
         return;
@@ -204,7 +201,7 @@ public final class Host implements TokenSink {
                         && (int64) this.trRid[i] == rid) {
                     String body #= this.diagQ.outJson(k);
                     String m #= Wire.diag(this.trId[i], body);
-                    this.say(this.trConn[i], m);
+                    this.say(this.trConn[i], #m);
                     break;
                 }
                 i = i + 1;
@@ -290,9 +287,10 @@ public final class Host implements TokenSink {
         return 0 - 1;
     }
 
-    /** Reader fibers: signal one inbound line. */
-    public void inbound(int32 connSlot, int32 lineSlot) {
-        this.inCh.send(((int64) connSlot << 16) | (int64) lineSlot);
+    /** Reader fibers: hand over one parsed request. */
+    public void inbound(int32 connSlot, #Req r) {
+        Inbound e = heap Inbound(connSlot, #r);
+        this.inCh.send(#e);
         return;
     }
 
@@ -302,12 +300,14 @@ public final class Host implements TokenSink {
         return;
     }
 
+    /** Queue `m` for a connection. A sink: `say(c, #m)` hands the message
+     *  over and nothing copies it; a literal is lent. */
     void say(int32 connSlot, String m) {
         WsConn c = this.conns[connSlot];
         if (c == null || c.dead) {
             return;
         }
-        if (!c.enqueueOut(m)) {
+        if (!c.enqueueOut(#m)) {
             // §5.3.2: a full outbox means a client that stopped
             // reading; shed it rather than wait on it.
             c.dead = true;
@@ -322,35 +322,35 @@ public final class Host implements TokenSink {
                 this.driveStep();
                 boolean absorbing = true;
                 while (absorbing) {
-                    Optional<int64> got = this.inCh.tryReceive();
+                    Optional<Inbound> got = this.inCh.tryReceive();
                     if (got.isPresent()) {
-                        this.dispatch(got.get());
+                        Inbound e #= got.take();
+                        this.dispatch(#e);
                     } else {
                         absorbing = false;
                     }
                 }
             } else {
-                Optional<int64> got = this.inCh.receive();
+                Optional<Inbound> got = this.inCh.receive();
                 if (got.isEmpty()) {
                     return;
                 }
-                this.dispatch(got.get());
+                Inbound e #= got.take();
+                this.dispatch(#e);
             }
         }
         return;
     }
 
-    void dispatch(int64 sig) {
-        int32 connSlot = (int32) (sig >> 16);
-        int32 lineSlot = (int32) (sig & 65535L);
+    void dispatch(#Inbound e) {
+        int32 connSlot = e.connSlot;
         WsConn c = this.conns[connSlot];
         if (c == null || c.dead) {
             return;
         }
-        String line = c.inLineAt(lineSlot);
         int64 nowMs = Clock.nanoTime() / 1000000L;
         this.reg.expire(nowMs);
-        Req r #= Protocol.parseLine(line);
+        Req r #= e.req;
 
         // 7.2.3: a token check gates EVERYTHING on an unauthed
         // connection — close before any other op is processed (7.1.4).
@@ -368,7 +368,7 @@ public final class Host implements TokenSink {
         if (!r.ok) {
             String m #= Wire.error(r.id, r.hasId, ErrKind.BAD_REQUEST,
                 r.err, false);
-            this.say(connSlot, m);
+            this.say(connSlot, #m);
             return;
         }
         if (r.op.equals("auth")) {
@@ -381,7 +381,7 @@ public final class Host implements TokenSink {
         }
         if (r.op.equals("health")) {
             String m #= Wire.health(r.id, this.state, "");
-            this.say(connSlot, m);
+            this.say(connSlot, #m);
             return;
         }
         if (r.op.equals("open")) {
@@ -389,11 +389,11 @@ public final class Host implements TokenSink {
             if (sid == null) {
                 String m #= Wire.error(r.id, r.hasId, ErrKind.CAPACITY,
                     "no session slot free", false);
-                this.say(connSlot, m);
+                this.say(connSlot, #m);
                 return;
             }
             String m #= Wire.opened(r.id, sid);
-            this.say(connSlot, m);
+            this.say(connSlot, #m);
             return;
         }
         if (r.op.equals("close")) {
@@ -401,11 +401,11 @@ public final class Host implements TokenSink {
                 String m #= Wire.error(r.id, r.hasId,
                     ErrKind.SESSION_GONE, "close: no such open session",
                     false);
-                this.say(connSlot, m);
+                this.say(connSlot, #m);
                 return;
             }
             String m #= Wire.closedOk(r.id, r.session);
-            this.say(connSlot, m);
+            this.say(connSlot, #m);
             return;
         }
         if (r.op.equals("cancel")) {
@@ -419,7 +419,7 @@ public final class Host implements TokenSink {
                 String m #= Wire.error(r.id, r.hasId, ErrKind.BAD_REQUEST,
                     "cancel: no request " + r.id
                     + " in flight on this connection", false);
-                this.say(connSlot, m);
+                this.say(connSlot, #m);
             }
             return;
         }
@@ -433,15 +433,15 @@ public final class Host implements TokenSink {
                     : "unknown session id - never issued by this host";
                 String m #= Wire.error(r.id, r.hasId,
                     ErrKind.SESSION_GONE, why, true);
-                this.say(connSlot, m);
+                this.say(connSlot, #m);
                 return;
             }
         }
-        this.submitOne(connSlot, r, line);
+        this.submitOne(connSlot, #r);
         return;
     }
 
-    void submitOne(int32 connSlot, Req r, String line) {
+    void submitOne(int32 connSlot, #Req r) {
         int32[] ids = null;
         if (r.op.equals("chat")) {
             String rendered #= ChatOp.render(this.tpl, r.messagesRaw);
@@ -450,7 +450,7 @@ public final class Host implements TokenSink {
                     ErrKind.BAD_REQUEST,
                     "this model ships no chat template - use "
                     + "\"generate\" with a raw prompt", false);
-                this.say(connSlot, tm);
+                this.say(connSlot, #tm);
                 return;
             }
             // RAW encode: the render already carries BOS and the role
@@ -465,20 +465,22 @@ public final class Host implements TokenSink {
                 "prompt is " + n + " tokens and n is " + r.n
                 + ", which exceeds the " + this.ctxLimit
                 + "-token context", false);
-            this.say(connSlot, cm);
+            this.say(connSlot, #cm);
             return;
         }
         int32 slot = this.freeReqSlot();
         if (slot < 0) {
             // 7.1.5: capacity means WAIT, not refuse — until the wait
             // itself would be unbounded.
-            if (this.enqueueWaiting(connSlot, line)) {
+            int64 wid = r.id;
+            boolean whas = r.hasId;
+            if (this.enqueueWaiting(connSlot, #r)) {
                 return;
             }
-            String m #= Wire.error(r.id, r.hasId, ErrKind.CAPACITY,
+            String m #= Wire.error(wid, whas, ErrKind.CAPACITY,
                 "busy: " + this.live + " in flight and the queue is full",
                 false);
-            this.say(connSlot, m);
+            this.say(connSlot, #m);
             return;
         }
         SampleParams p = heap SampleParams(r.temp, r.seed);
@@ -491,7 +493,7 @@ public final class Host implements TokenSink {
         } catch (Throwable t) {
             String m #= Wire.error(r.id, r.hasId, ErrKind.INTERNAL,
                 "submit failed", false);
-            this.say(connSlot, m);
+            this.say(connSlot, #m);
             return;
         }
         this.ensureChunker();
@@ -529,53 +531,54 @@ public final class Host implements TokenSink {
         return;
     }
 
-    void ensureQueue() {
-        if (this.qLine != null) {
-            return;
+    /** Queue a request behind a full in-flight table. False when the
+     *  queue is at its bound: the request is dropped and the caller sheds
+     *  it with a busy error. */
+    boolean enqueueWaiting(int32 connSlot, #Req r) {
+        if (this.waitQ == null) {
+            this.waitQ = heap Channel<Inbound>(this.queueBound);
         }
-        this.qLine = heap ArrayList<String>();
-        int32 i = 0;
-        while (i < this.queueBound) {
-            String e #= WsConn.cp("");
-            this.qLine.add(#e);
-            i = i + 1;
-        }
-        this.qConn = heap int32[this.queueBound];
-        return;
-    }
-
-    boolean enqueueWaiting(int32 connSlot, String line) {
-        this.ensureQueue();
         if (this.qCount >= this.queueBound) {
             return false;
         }
-        int32 t = (this.qHead + this.qCount) % this.queueBound;
-        String c #= WsConn.cp(line);
-        this.qLine.set(t, #c);
-        this.qConn[t] = connSlot;
+        Inbound e = heap Inbound(connSlot, #r);
+        if (!this.waitQ.trySend(#e)) {
+            return false;
+        }
         this.qCount = this.qCount + 1;
         return true;
     }
 
+    /** The next queued request, owned; null when none is waiting. */
+    #Inbound takeWaiting() {
+        if (this.qCount == 0) {
+            return null;
+        }
+        Optional<Inbound> o = this.waitQ.tryReceive();
+        if (!o.isPresent()) {
+            return null;
+        }
+        this.qCount = this.qCount - 1;
+        return #o.take();
+    }
+
     /** Admit queued requests into slots reaping just freed. A queued
-     *  line re-parses and re-touches its session: time passed while it
-     *  waited, and expiry must not be blind to that. */
+     *  request re-touches its session: time passed while it waited, and
+     *  expiry must not be blind to that. */
     void drainQueue() {
         while (this.qCount > 0 && this.freeReqSlot() >= 0) {
-            String qline #= WsConn.cp(this.qLine.get(this.qHead));
-            int32 qcs = this.qConn[this.qHead];
-            this.qHead = (this.qHead + 1) % this.queueBound;
-            this.qCount = this.qCount - 1;
+            Inbound q #= this.takeWaiting();
+            if (q == null) {
+                return;
+            }
+            int32 qcs = q.connSlot;
             WsConn c = this.conns[qcs];
             if (c == null || c.dead) {
                 continue;
             }
             int64 nowMs = Clock.nanoTime() / 1000000L;
             this.reg.expire(nowMs);
-            Req qr #= Protocol.parseLine(qline);
-            if (!qr.ok) {
-                continue;
-            }
+            Req qr #= q.req;
             if (qr.hasSession) {
                 int32 st = this.reg.touch(qr.session, nowMs);
                 if (st != Sessions.OPEN) {
@@ -583,11 +586,11 @@ public final class Host implements TokenSink {
                         ErrKind.SESSION_GONE,
                         "session expired while the request was queued",
                         true);
-                    this.say(qcs, m);
+                    this.say(qcs, #m);
                     continue;
                 }
             }
-            this.submitOne(qcs, qr, qline);
+            this.submitOne(qcs, #qr);
         }
         return;
     }
@@ -631,7 +634,7 @@ public final class Host implements TokenSink {
                             Utf8Chunker.emptyBytes(), true);
                         if (tailS.byteLength() > 0) {
                             String tm #= Wire.chunk(this.trId[i], tailS);
-                            this.say(this.trConn[i], tm);
+                            this.say(this.trConn[i], #tm);
                         }
                     }
                     String finish = "budget";
@@ -658,7 +661,7 @@ public final class Host implements TokenSink {
                     String m #= Wire.doneUsage(this.trId[i], finish,
                         (int64) this.trPromptLen[i],
                         (int64) q.generatedCount(), pMs, dMs);
-                    this.say(this.trConn[i], m);
+                    this.say(this.trConn[i], #m);
                     this.trOpen[i] = false;
                     if (this.trDiag[i]) {
                         this.trDiag[i] = false;
@@ -678,7 +681,7 @@ public final class Host implements TokenSink {
         while (i < this.cap) {
             if (this.trOpen[i]) {
                 String m #= Wire.done(this.trId[i], "error");
-                this.say(this.trConn[i], m);
+                this.say(this.trConn[i], #m);
                 this.trOpen[i] = false;
                 if (this.trDiag[i]) {
                     this.trDiag[i] = false;
@@ -689,14 +692,13 @@ public final class Host implements TokenSink {
         }
         // Nothing queued behind a failed engine gets to start.
         while (this.qCount > 0) {
-            String qline #= WsConn.cp(this.qLine.get(this.qHead));
-            int32 qcs = this.qConn[this.qHead];
-            this.qHead = (this.qHead + 1) % this.queueBound;
-            this.qCount = this.qCount - 1;
-            Req qr #= Protocol.parseLine(qline);
-            String qm #= Wire.error(qr.id, qr.hasId, ErrKind.INTERNAL,
+            Inbound q #= this.takeWaiting();
+            if (q == null) {
+                break;
+            }
+            String qm #= Wire.error(q.req.id, q.req.hasId, ErrKind.INTERNAL,
                 "engine failed before this request started", false);
-            this.say(qcs, qm);
+            this.say(q.connSlot, #qm);
         }
         this.live = 0;
         return;
@@ -745,7 +747,7 @@ public final class Host implements TokenSink {
                 String s #= this.chunker.take(i, raw, false);
                 if (s.byteLength() > 0) {
                     String m #= Wire.chunk(this.trId[i], s);
-                    this.say(this.trConn[i], m);
+                    this.say(this.trConn[i], #m);
                 }
                 return;
             }

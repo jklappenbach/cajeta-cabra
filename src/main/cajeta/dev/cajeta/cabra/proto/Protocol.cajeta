@@ -32,6 +32,29 @@ public final class Protocol {
             r.err = "malformed json: " + t.getMessage();
             return #r;
         }
+        return #Protocol.fromValue(#r, v);
+    }
+
+    /**
+     * Parse the request in `bytes[0 .. len)` in place: nothing copies the
+     * message, and bytes past `len` (a reused receive buffer's stale tail)
+     * are never read. The Req owns copies of the fields it keeps, so it
+     * outlives the buffer, which the caller may reuse as soon as this
+     * returns.
+     */
+    public static #Req parseBytes(int8[] bytes, int32 len) {
+        Req r = heap Req();
+        JsonValue v = null;
+        try {
+            v #= Json.parse(bytes, (int64) len);
+        } catch (Throwable t) {
+            r.err = "malformed json: " + t.getMessage();
+            return #r;
+        }
+        return #Protocol.fromValue(#r, v);
+    }
+
+    static #Req fromValue(#Req r, JsonValue v) {
         if (v.kind() != JsonValue.OBJECT) {
             r.err = "request must be a json object";
             return #r;

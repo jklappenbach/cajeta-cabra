@@ -89,30 +89,201 @@ public final class Wire {
         return #= "{\"id\":" + id + ",\"closed\":\"" + session + "\"}";
     }
 
+    // ── streamed lines: one exact-size buffer each ────────────────────
+    //
+    // A chunk line is built once per generated token, so these builders
+    // measure the line first and write it into a single array of exactly
+    // that size: no intermediate strings, and the text is read in place
+    // (byteAt, never toBytes) and escaped straight into the line. The
+    // String takes the array, and a transport that sends from a string's
+    // own bytes never copies it again.
+
     public static #String chunk(int64 id, String text) {
-        String e #= Wire.esc(text);
-        return #= "{\"id\":" + id + ",\"chunk\":\"" + e + "\"}";
+        int32 n = 6 + Wire.digits(id) + 10 + Wire.escLen(text) + 2;
+        int8[] b = heap int8[n];
+        int32 at = Wire.lit(b, 0, "{\"id\":");
+        at = Wire.num(b, at, id);
+        at = Wire.lit(b, at, ",\"chunk\":\"");
+        at = Wire.putEsc(b, at, text);
+        at = Wire.lit(b, at, "\"}");
+        String out = heap String(#b, n);
+        return #= out;
     }
 
     /** §10.9: one forwarded record; `body` is the diag object, already
      *  JSON (DiagQueue.outJson). */
     public static #String diag(int64 id, String body) {
-        return #= "{\"id\":" + id + ",\"diag\":" + body + "}";
+        int32 n = 6 + Wire.digits(id) + 8 + body.byteLength() + 1;
+        int8[] b = heap int8[n];
+        int32 at = Wire.lit(b, 0, "{\"id\":");
+        at = Wire.num(b, at, id);
+        at = Wire.lit(b, at, ",\"diag\":");
+        at = Wire.lit(b, at, body);
+        at = Wire.lit(b, at, "}");
+        String out = heap String(#b, n);
+        return #= out;
     }
 
     /** The done line with its usage block (§3.1.2), the stdio shape. */
     public static #String doneUsage(int64 id, String finish,
             int64 promptTokens, int64 genTokens, int64 prefillMs,
             int64 decodeMs) {
-        return #= "{\"id\":" + id + ",\"done\":true,\"finish\":\""
-            + finish + "\",\"usage\":{\"prompt_tokens\":" + promptTokens
-            + ",\"gen_tokens\":" + genTokens + ",\"prefill_ms\":"
-            + prefillMs + ",\"decode_ms\":" + decodeMs + "}}";
+        int32 n = 6 + Wire.digits(id) + 23 + finish.byteLength() + 27
+            + Wire.digits(promptTokens) + 14 + Wire.digits(genTokens)
+            + 14 + Wire.digits(prefillMs) + 13 + Wire.digits(decodeMs) + 2;
+        int8[] b = heap int8[n];
+        int32 at = Wire.lit(b, 0, "{\"id\":");
+        at = Wire.num(b, at, id);
+        at = Wire.lit(b, at, ",\"done\":true,\"finish\":\"");
+        at = Wire.lit(b, at, finish);
+        at = Wire.lit(b, at, "\",\"usage\":{\"prompt_tokens\":");
+        at = Wire.num(b, at, promptTokens);
+        at = Wire.lit(b, at, ",\"gen_tokens\":");
+        at = Wire.num(b, at, genTokens);
+        at = Wire.lit(b, at, ",\"prefill_ms\":");
+        at = Wire.num(b, at, prefillMs);
+        at = Wire.lit(b, at, ",\"decode_ms\":");
+        at = Wire.num(b, at, decodeMs);
+        at = Wire.lit(b, at, "}}");
+        String out = heap String(#b, n);
+        return #= out;
     }
 
     public static #String done(int64 id, String finish) {
-        return #= "{\"id\":" + id + ",\"done\":true,\"finish\":\""
-            + finish + "\"}";
+        int32 n = 6 + Wire.digits(id) + 23 + finish.byteLength() + 2;
+        int8[] b = heap int8[n];
+        int32 at = Wire.lit(b, 0, "{\"id\":");
+        at = Wire.num(b, at, id);
+        at = Wire.lit(b, at, ",\"done\":true,\"finish\":\"");
+        at = Wire.lit(b, at, finish);
+        at = Wire.lit(b, at, "\"}");
+        String out = heap String(#b, n);
+        return #= out;
+    }
+
+    /** Copy `s`'s bytes into `b` at `at`, read in place; the next offset. */
+    static int32 lit(int8[] b, int32 at, String s) {
+        int32 n = s.byteLength();
+        int32 i = 0;
+        while (i < n) {
+            b[at + i] = s.byteAt(i);
+            i = i + 1;
+        }
+        return at + n;
+    }
+
+    /** Decimal digits of `v`, with its sign. */
+    static int32 digits(int64 v) {
+        if (v == 0L) {
+            return 1;
+        }
+        int32 d = 0;
+        int64 x = v;
+        if (x < 0L) {
+            d = 1;
+        }
+        while (x != 0L) {
+            x = x / 10L;
+            d = d + 1;
+        }
+        return d;
+    }
+
+    /** Write `v` in decimal at `at`; the next offset. Works on the
+     *  negated remainders, so the most negative int64 needs no special
+     *  case. */
+    static int32 num(int8[] b, int32 at, int64 v) {
+        int32 n = Wire.digits(v);
+        int32 end = at + n;
+        if (v == 0L) {
+            b[at] = (int8) 48;
+            return end;
+        }
+        int64 x = v;
+        if (x < 0L) {
+            b[at] = (int8) 45;
+        }
+        int32 i = end - 1;
+        while (x != 0L) {
+            int64 r = x % 10L;
+            if (r < 0L) {
+                r = 0L - r;
+            }
+            b[i] = (int8) (48L + r);
+            x = x / 10L;
+            i = i - 1;
+        }
+        return end;
+    }
+
+    /** Bytes `s` takes once JSON-escaped, as `esc` escapes it. */
+    static int32 escLen(String s) {
+        int32 n = s.byteLength();
+        int32 out = 0;
+        int32 i = 0;
+        while (i < n) {
+            int32 c = (int32) s.byteAt(i);
+            if (c < 0) { c = c + 256; }
+            if (c == 34 || c == 92 || c == 10 || c == 13 || c == 9) {
+                out = out + 2;
+            } else if (c < 32) {
+                out = out + 6;
+            } else {
+                out = out + 1;
+            }
+            i = i + 1;
+        }
+        return out;
+    }
+
+    /** Write `s` JSON-escaped at `at`, reading it in place; the next
+     *  offset. */
+    static int32 putEsc(int8[] b, int32 at, String s) {
+        int32 n = s.byteLength();
+        int32 o = at;
+        int32 i = 0;
+        while (i < n) {
+            int8 raw = s.byteAt(i);
+            int32 c = (int32) raw;
+            if (c < 0) { c = c + 256; }
+            if (c == 34 || c == 92) {
+                b[o] = (int8) 92;
+                b[o + 1] = raw;
+                o = o + 2;
+            } else if (c == 10) {
+                b[o] = (int8) 92;
+                b[o + 1] = (int8) 110;
+                o = o + 2;
+            } else if (c == 13) {
+                b[o] = (int8) 92;
+                b[o + 1] = (int8) 114;
+                o = o + 2;
+            } else if (c == 9) {
+                b[o] = (int8) 92;
+                b[o + 1] = (int8) 116;
+                o = o + 2;
+            } else if (c < 32) {
+                b[o] = (int8) 92;
+                b[o + 1] = (int8) 117;
+                b[o + 2] = (int8) 48;
+                b[o + 3] = (int8) 48;
+                b[o + 4] = Wire.hexByte(c / 16);
+                b[o + 5] = Wire.hexByte(c % 16);
+                o = o + 6;
+            } else {
+                b[o] = raw;
+                o = o + 1;
+            }
+            i = i + 1;
+        }
+        return o;
+    }
+
+    static int8 hexByte(int32 v) {
+        if (v < 10) {
+            return (int8) (48 + v);
+        }
+        return (int8) (87 + v);
     }
 
     public static #String health(int64 id, String state, String model) {

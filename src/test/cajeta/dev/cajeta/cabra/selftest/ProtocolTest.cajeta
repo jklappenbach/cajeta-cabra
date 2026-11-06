@@ -80,6 +80,50 @@ public class ProtocolTest {
         Assert.equals("3", r.session);
     }
 
+    /** Zero-copy inbound: a request parses from the bytes it arrived in,
+     *  read in place. Same fields as parsing the line, escapes decoded. */
+    @Test
+    public void aRequestParsesFromItsBytesInPlace() {
+        String line = "{\"op\":\"chat\",\"id\":4,\"session\":\"a.b.c\","
+            + "\"messages\":[{\"role\":\"user\",\"content\":\"hi\\nthere\"}],"
+            + "\"n\":9,\"stop\":[\"END\"]}";
+        int8[] b #= line.toBytes();
+        Req r #= Protocol.parseBytes(b, (int32) b.count());
+        Req q #= Protocol.parseLine(line);
+        Assert.isTrue(r.ok);
+        Assert.equals("chat", r.op);
+        Assert.equals(4L, r.id);
+        Assert.equals("a.b.c", r.session);
+        Assert.equals(9, r.n);
+        Assert.equals(q.messagesRaw, r.messagesRaw);
+        Assert.equals(1, r.stops.count());
+        Assert.equals("END", r.stops.get(0));
+    }
+
+    /** A reused receive buffer is longer than the message in it: only
+     *  the first `len` bytes are the request, and what follows them (here
+     *  the tail of a longer, earlier message) is never read. */
+    @Test
+    public void onlyTheMessageLengthOfAReusedBufferIsRead() {
+        String line = "{\"op\":\"health\",\"id\":2}";
+        String stale = line + ",\"op\":\"shutdown\"} trailing bytes";
+        int8[] b #= stale.toBytes();
+        Req r #= Protocol.parseBytes(b, (int32) line.byteLength());
+        Assert.isTrue(r.ok);
+        Assert.equals("health", r.op);
+        Assert.equals(2L, r.id);
+    }
+
+    /** Malformed bytes yield an error Req, never a throw, as lines do. */
+    @Test
+    public void malformedBytesYieldAnErrorNotAThrow() {
+        String bad = "{\"op\":";
+        int8[] b #= bad.toBytes();
+        Req r #= Protocol.parseBytes(b, (int32) b.count());
+        Assert.isFalse(r.ok);
+        Assert.isTrue(r.err.byteLength() > 0);
+    }
+
     @Test
     public void samplingFieldsOverrideDefaults() {
         Req r #= Protocol.parseLine("{\"op\":\"generate\",\"id\":2,"
