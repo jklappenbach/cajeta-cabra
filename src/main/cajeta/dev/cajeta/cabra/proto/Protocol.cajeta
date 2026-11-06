@@ -52,10 +52,18 @@ public final class Protocol {
         String op #= opv.asString();
         r.op #= op;
 
+        // The issued id is a string (§11.5). A number, from a client that
+        // predates it, is carried as its text: the store answers it as
+        // unknown, so that client is told and opens a fresh session.
         JsonValue sv0 = o.get("session");
-        if (sv0 != null && sv0.kind() == JsonValue.NUMBER) {
+        if (sv0 != null && sv0.kind() == JsonValue.STRING) {
+            String sid #= sv0.asString();
+            r.session #= sid;
             r.hasSession = true;
-            r.session = sv0.asInt64();
+        } else if (sv0 != null && sv0.kind() == JsonValue.NUMBER) {
+            String sid #= "" + sv0.asInt64();
+            r.session #= sid;
+            r.hasSession = true;
         }
 
         if (op.equals("auth")) {

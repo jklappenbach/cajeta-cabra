@@ -39,7 +39,8 @@ jobs:
         with:
           path: cabra
 
-      # llm, http, logging and unit resolve from Olla at cajeta.json's pins.
+      # llm, http, logging, unit and primavera resolve from Olla at
+      # cajeta.json's pins, crypto and cloud at its overrides.
       # jinja has no pin there and codec's native zlib is a build artifact,
       # so those two are cloned from their tags. The tests load
       # toy.gguf from ../cajeta-llm, so llm is cloned at its pin for fixtures

@@ -45,8 +45,8 @@ public class ClientTest {
         public String token;
         public String inPath;
         public String outPath;
-        public int64 session;       // -1 = open fresh
-        public int64 sessionOut;
+        public String session;       // null = open fresh
+        public String sessionOut;
         public RelayRun sessionFrom; // resume with THIS run's session
         public RelayRun waitFor;     // strict ordering between runs
         public int32 rc;
@@ -56,8 +56,8 @@ public class ClientTest {
             this.token = "";
             this.inPath = "";
             this.outPath = "";
-            this.session = 0L - 1L;
-            this.sessionOut = 0L - 1L;
+            this.session = null;
+            this.sessionOut = null;
             this.sessionFrom = null;
             this.waitFor = null;
             this.rc = 0 - 1;
@@ -89,7 +89,7 @@ public class ClientTest {
             Fiber.sleep(Duration.ofMillis(5L));
             tries = tries + 1;
         }
-        int64 sid = rr.session;
+        String sid = rr.session;
         if (rr.sessionFrom != null) {
             sid = rr.sessionFrom.sessionOut;
         }
@@ -99,7 +99,11 @@ public class ClientTest {
         LineReader r = heap LineReader(#fin);
         LineReader.start(r);
         rr.rc = rel.run(r);
-        rr.sessionOut = rel.sessionId();
+        // A copy: the id outlives the relay.
+        String so = rel.sessionId();
+        if (so != null) {
+            rr.sessionOut #= "" + so;
+        }
         r.close();
         rel.shut();
         rr.done = true;
@@ -154,7 +158,7 @@ public class ClientTest {
             h.shutdown();
         }
         Assert.equals(0L, (int64) rr.rc);
-        Assert.isTrue(rr.sessionOut >= 0L);
+        Assert.isTrue(rr.sessionOut != null);
         ArrayList<String> lines #= ConcurrencyTest.linesOf(rr.outPath);
         String out5 #= ConcurrencyTest.chunksFor(lines, 5L);
         Assert.isTrue(out5.equals(soloB));
@@ -200,8 +204,9 @@ public class ClientTest {
         }
         Assert.equals(0L, (int64) r1.rc);
         Assert.equals(0L, (int64) r2.rc);
-        Assert.isTrue(r1.sessionOut >= 0L);
-        Assert.isTrue(r2.sessionOut == r1.sessionOut);
+        Assert.isTrue(r1.sessionOut != null);
+        Assert.isTrue(r2.sessionOut != null);
+        Assert.isTrue(r2.sessionOut.equals(r1.sessionOut));
         ArrayList<String> lines #= ConcurrencyTest.linesOf(r2.outPath);
         String out8 #= ConcurrencyTest.chunksFor(lines, 8L);
         Assert.isTrue(out8.byteLength() > 0);

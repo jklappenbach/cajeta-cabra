@@ -17,5 +17,5 @@ import dev.cajeta.cabra.proto.Req;
  * throw's text into a kind (6.1.8).
  */
 public interface TurnPort {
-    public String turn(int64 session, Req r, TurnEmit e);
+    public String turn(String session, Req r, TurnEmit e);
 }

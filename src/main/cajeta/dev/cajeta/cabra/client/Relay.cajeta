@@ -42,18 +42,18 @@ public final class Relay {
 
     int32 port;
     String token;
-    int64 session;
+    String session;          // the host's issued id; null = open fresh
     FileWriter out;          // owned
     TcpStream sock;          // owned
     AsyncReader rd;          // owned; borrowed by ws
     AsyncWriter wr;          // owned; borrowed by ws
     WebSocket ws;            // owned
 
-    public Relay(int32 port, String token, int64 session,
+    public Relay(int32 port, String token, String session,
             #FileWriter out) {
         this.port = port;
         this.token #= token;
-        this.session = session;
+        this.session #= session;
         this.out #= out;
         this.sock = null;
         this.rd = null;
@@ -64,7 +64,7 @@ public final class Relay {
 
     /** The session this relay is driving — print-worthy for a parent
      *  that wants to resume after a crash. */
-    public int64 sessionId() {
+    public String sessionId() {
         return this.session;
     }
 
@@ -114,7 +114,7 @@ public final class Relay {
     }
 
     boolean ensureSession() {
-        if (this.session >= 0L) {
+        if (this.session != null) {
             return true;
         }
         try {
@@ -131,7 +131,9 @@ public final class Relay {
             return false;
         }
         JsonValue v #= Json.parse(rep);
-        this.session = v.object().get("session").asInt64();
+        // A copy: the id outlives the parsed reply (§11.5's string id).
+        String sid #= "" + v.object().get("session").asString();
+        this.session #= sid;
         System.stderr.println("cabra: session " + this.session
             + " (resume later with --session " + this.session + ")");
         return true;
@@ -220,12 +222,12 @@ public final class Relay {
     }
 
     void closeSession() {
-        if (this.session < 0L) {
+        if (this.session == null) {
             return;
         }
         try {
-            this.ws.send("{\"op\":\"close\",\"id\":0,\"session\":"
-                + this.session + "}");
+            this.ws.send("{\"op\":\"close\",\"id\":0,\"session\":\""
+                + this.session + "\"}");
             String ack #= this.recvLine();
             if (ack == null) {
                 return;
@@ -259,10 +261,10 @@ public final class Relay {
         return;
     }
 
-    /** `{...}` -> `{"session":N,...}` — textual injection keeps every
-     *  field the parent sent, parsed or not. */
+    /** `{...}` -> `{"session":"<id>",...}` — textual injection keeps
+     *  every field the parent sent, parsed or not. */
     #String withSession(String line) {
-        String head = "{\"session\":" + this.session + ",";
+        String head = "{\"session\":\"" + this.session + "\",";
         int8[] hb #= head.toBytes();
         int8[] lb #= line.toBytes();
         int32 hn = (int32) hb.count();

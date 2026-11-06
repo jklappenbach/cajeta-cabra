@@ -104,7 +104,7 @@ public class CancelTest {
      *  having first tried to cancel an id that is not its own. */
     static class CancelRun {
         public int32 port;
-        public int64 session;
+        public String session;
         public String finish;
         public int32 chunks;
         public String foreignErrKind;
@@ -113,7 +113,7 @@ public class CancelTest {
         public CancelRun waitFor;   // the neighbour shuts down after this
         public CancelRun() {
             this.port = 0;
-            this.session = 0L - 1L;
+            this.session = null;
             this.finish = "";
             this.chunks = 0;
             this.foreignErrKind = "";
@@ -140,9 +140,9 @@ public class CancelTest {
         ws.send("{\"op\":\"open\",\"id\":2}");
         String op #= HostTest.recvText(ws);
         JsonValue ov #= Json.parse(op);
-        cr.session = ov.object().get("session").asInt64();
-        ws.send("{\"op\":\"generate\",\"id\":2,\"session\":" + cr.session
-            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_B
+        cr.session #= "" + ov.object().get("session").asString();
+        ws.send("{\"op\":\"generate\",\"id\":2,\"session\":\"" + cr.session
+            + "\",\"prompt\":\"" + ConcurrencyTest.PROMPT_B
             + "\",\"n\":6,\"temp\":0}");
         while (true) {
             String line #= HostTest.recvText(ws);
@@ -198,7 +198,7 @@ public class CancelTest {
         ws.send("{\"op\":\"open\",\"id\":7}");
         String op #= HostTest.recvText(ws);
         JsonValue ov #= Json.parse(op);
-        cr.session = ov.object().get("session").asInt64();
+        cr.session #= "" + ov.object().get("session").asString();
 
         // Not in flight on THIS connection (the other client owns id 2):
         // refused with the id echoed, and nothing else happens.
@@ -211,8 +211,8 @@ public class CancelTest {
             cr.foreignErrKind #= k;
         }
 
-        ws.send("{\"op\":\"generate\",\"id\":7,\"session\":" + cr.session
-            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
+        ws.send("{\"op\":\"generate\",\"id\":7,\"session\":\"" + cr.session
+            + "\",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
             + "\",\"n\":1500,\"temp\":0}");
         boolean sent = false;
         while (true) {

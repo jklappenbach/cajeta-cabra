@@ -81,12 +81,12 @@ public final class Wire {
         return #= c;
     }
 
-    public static #String opened(int64 id, int64 session) {
-        return #= "{\"id\":" + id + ",\"session\":" + session + "}";
+    public static #String opened(int64 id, String session) {
+        return #= "{\"id\":" + id + ",\"session\":\"" + session + "\"}";
     }
 
-    public static #String closedOk(int64 id, int64 session) {
-        return #= "{\"id\":" + id + ",\"closed\":" + session + "}";
+    public static #String closedOk(int64 id, String session) {
+        return #= "{\"id\":" + id + ",\"closed\":\"" + session + "\"}";
     }
 
     public static #String chunk(int64 id, String text) {

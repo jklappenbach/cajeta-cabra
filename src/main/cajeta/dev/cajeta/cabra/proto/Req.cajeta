@@ -25,9 +25,9 @@ public final class Req {
 
     // Session addressing (spec 5.2.1): present when the request names
     // the conversation it belongs to; absent = one-shot, the original
-    // stdio behaviour.
+    // stdio behaviour. The id is the host's issued string (§11.5).
     public boolean hasSession;
-    public int64 session;
+    public String session;
 
     // Host-mode auth (spec 5.5.1): the token presented on connect.
     public String token;
@@ -60,7 +60,7 @@ public final class Req {
         this.hasId = false;
         this.id = 0L;
         this.hasSession = false;
-        this.session = 0L;
+        this.session = "";
         this.token = "";
         this.prompt = "";
         this.messagesRaw = "";

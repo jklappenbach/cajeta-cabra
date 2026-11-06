@@ -633,7 +633,10 @@ fiber-crossing request scope; a byte-bounded send queue.*
 ### 12.1 TDD
 - [ ] 12.1.1 Units 6–8's suites pass unchanged against the primavera
       assembly (SessionCoreTest, HostTest, ClientTest — the byte-level
-      bars).
+      bars), except that a session id is primavera's issued string
+      (spec §11.5, Julian 2026-11-06): expected bytes carry it as a JSON
+      string, and a forged id of the issued shape answers `session_gone`
+      only when the store issued it.
 - [ ] 12.1.2 Session expiry under a `ManualTimeSource`: open, advance past
       idle, `session_gone`; touch before expiry keeps it (§5.2.4, now
       primavera's clock).
@@ -650,12 +653,14 @@ fiber-crossing request scope; a byte-bounded send queue.*
       finishes byte-equal to its solo (7.1.6's bar); past the byte bound
       the slow connection closes with 1008, its session stays OPEN, and a
       reconnect resumes it by id (spec §11.6.1).
-- [ ] 12.1.6 Capacity and expiry through primavera: at capacity `open`
+- [x] 12.1.6 Capacity and expiry through primavera: at capacity `open`
       answers `kind: capacity`; an expired or closed session's KV slot
       returns to the pool through the eviction observer.
 
 ### 12.2 Coding
-- [ ] 12.2.1 Pin primavera 0.5.0 (primavera-live-sessions). Released
+- [x] 12.2.1 Pin primavera 0.5.1 (0.5.0 plus the 1001 close frame on
+      shutdown; on http 0.9.1, so http moves 0.9.0 → 0.9.1 with it).
+      0.5.0 was primavera-live-sessions. Released
       2026-10-20 on cajeta v0.44.0, http 0.9.0, cloud 0.4.0 and crypto 0.1.0;
       on Olla as sha256:f8c5bd41…, signed release-1 (0.4.0 was the crypto
       move, so live sessions shipped as 0.5.0). Its CHANGELOG.md has the
@@ -669,6 +674,12 @@ fiber-crossing request scope; a byte-bounded send queue.*
       the connection's turns' output; a `Turn` per generation; components
       for engine / template / credential / `DiagnosticBridge`; `Main`
       assembles the graph.
+      *(2026-11-06: the session half is in. `core/Sessions` holds a
+      primavera `SessionStore` behind cabra's one session interface;
+      `SessionRegistry` is gone; ids are the store's strings on the wire,
+      in the relay and in the web client. The ws half needs the whole
+      message text from a WebSocket path, which `JsonBody` does not
+      expose in primavera 0.5.1.)*
 - [ ] 12.2.3 `docs/architecture.md`: cabra as a primavera application.
 
 ### 12.3 Acceptance

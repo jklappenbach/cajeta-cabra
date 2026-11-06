@@ -158,9 +158,9 @@ public class DiagForwardTest {
         ws.send("{\"op\":\"open\",\"id\":4}");
         String op #= HostTest.recvText(ws);
         JsonValue ov #= Json.parse(op);
-        int64 sid = ov.object().get("session").asInt64();
-        ws.send("{\"op\":\"generate\",\"id\":4,\"session\":" + sid
-            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
+        String sid #= "" + ov.object().get("session").asString();
+        ws.send("{\"op\":\"generate\",\"id\":4,\"session\":\"" + sid
+            + "\",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
             + "\",\"n\":4,\"temp\":0,\"diag\":true}");
         boolean done = false;
         while (true) {

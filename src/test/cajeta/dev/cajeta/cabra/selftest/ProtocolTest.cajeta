@@ -56,6 +56,30 @@ public class ProtocolTest {
         Assert.equals(34, (int32) b[3]);   // real quote
     }
 
+    /** Spec §5.2.1 / §11.5: the session id is the opaque string the host
+     *  issued, carried verbatim. */
+    @Test
+    public void aSessionIdIsAString() {
+        Req r #= Protocol.parseLine(
+            "{\"op\":\"generate\",\"id\":1,\"session\":\"Ab_9.AAAAAAAAAAE.x-Y\","
+            + "\"prompt\":\"p\"}");
+        Assert.isTrue(r.ok);
+        Assert.isTrue(r.hasSession);
+        Assert.equals("Ab_9.AAAAAAAAAAE.x-Y", r.session);
+    }
+
+    /** A numeric id from a client that predates the string ids still
+     *  names a session: its text, which the store answers as unknown, so
+     *  the client is told and opens a fresh one (§5.2.5). */
+    @Test
+    public void aNumericSessionIdIsCarriedAsItsText() {
+        Req r #= Protocol.parseLine(
+            "{\"op\":\"generate\",\"id\":1,\"session\":3,\"prompt\":\"p\"}");
+        Assert.isTrue(r.ok);
+        Assert.isTrue(r.hasSession);
+        Assert.equals("3", r.session);
+    }
+
     @Test
     public void samplingFieldsOverrideDefaults() {
         Req r #= Protocol.parseLine("{\"op\":\"generate\",\"id\":2,"

@@ -6,7 +6,8 @@ import type { Message, TurnParams } from './protocol/client'
 export interface Conversation {
   id: string
   title: string
-  session: number | null
+  // The host's issued id (spec §11.5), sent back verbatim; null until opened.
+  session: string | null
   messages: Message[]
   params: TurnParams
   createdAt: number
@@ -20,7 +21,11 @@ export function loadConversations(): Conversation[] {
     const raw = localStorage.getItem(KEY)
     if (!raw) return []
     const v = JSON.parse(raw) as Conversation[]
-    return Array.isArray(v) ? v : []
+    if (!Array.isArray(v)) return []
+    // A conversation saved before session ids were strings holds a number
+    // the host no longer issues: drop it, so the next turn opens a fresh
+    // session and resubmits the conversation (§5.2.8).
+    return v.map((c) => (typeof c.session === 'string' ? c : { ...c, session: null }))
   } catch {
     return []
   }

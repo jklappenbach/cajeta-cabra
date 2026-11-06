@@ -26,19 +26,19 @@ import dev.cajeta.cabra.proto.Wire;
  */
 public final class ServeCore {
 
-    SessionRegistry reg;    // owned
+    Sessions reg;           // owned
     TurnPort port;          // borrow; the host owns its engine adapter
     String state;
 
     public ServeCore(int32 maxSessions, int64 idleExpiryMs,
             TurnPort port) {
-        this.reg = heap SessionRegistry(maxSessions, idleExpiryMs);
+        this.reg = heap Sessions(maxSessions, idleExpiryMs);
         this.port #= port;
         this.state = "ready";
         return;
     }
 
-    public SessionRegistry registry() {
+    public Sessions sessions() {
         return this.reg;
     }
 
@@ -65,8 +65,8 @@ public final class ServeCore {
             return true;
         }
         if (r.op.equals("open")) {
-            int64 sid = this.reg.open(nowMs);
-            if (sid < 0L) {
+            String sid #= this.reg.open(nowMs);
+            if (sid == null) {
                 String m #= Wire.error(r.id, r.hasId, ErrKind.CAPACITY,
                     "no session slot free: " + this.reg.openCount()
                     + " open", false);
@@ -78,7 +78,7 @@ public final class ServeCore {
             return true;
         }
         if (r.op.equals("close")) {
-            if (!r.hasSession || !this.reg.close(r.session)) {
+            if (!r.hasSession || !this.reg.close(r.session, nowMs)) {
                 String m #= Wire.error(r.id, r.hasId,
                     ErrKind.SESSION_GONE,
                     "close: no such open session", false);
@@ -102,15 +102,15 @@ public final class ServeCore {
         }
 
         // generate / chat.
-        int64 sid = 0L;
+        String sid = null;
         if (r.hasSession) {
             int32 st = this.reg.touch(r.session, nowMs);
-            if (st != SessionRegistry.OPEN) {
+            if (st != Sessions.OPEN) {
                 // §5.2.5: told EXPLICITLY, never handed a silent fresh
                 // session — and told WHICH, because "gone" means the
                 // cached context is lost while "unknown" means the
                 // wrong host.
-                String why = st == SessionRegistry.GONE
+                String why = st == Sessions.GONE
                     ? "session expired or closed - open a new one and resend context"
                     : "unknown session id - never issued by this host";
                 String m #= Wire.error(r.id, r.hasId,

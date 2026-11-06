@@ -41,7 +41,7 @@ public class HostTest {
         public int64 wireId;
         public String acc;      // concatenated chunk text
         public String finish;
-        public int64 session;
+        public String session;
         public boolean sawAuthed;
         public boolean closedEarly;
         public boolean sendShutdown;
@@ -52,7 +52,7 @@ public class HostTest {
             this.wireId = 0L;
             this.acc = "";
             this.finish = "";
-            this.session = 0L - 1L;
+            this.session = null;
             this.sawAuthed = false;
             this.closedEarly = false;
             this.sendShutdown = false;
@@ -64,14 +64,14 @@ public class HostTest {
      *  runs, id 13 is shed past the queue bound. */
     static class QueueRun {
         public int32 port;
-        public int64 session;
+        public String session;
         public String acc12;
         public String finish11;
         public String finish12;
         public String errKind13;
         public QueueRun() {
             this.port = 0;
-            this.session = 0L - 1L;
+            this.session = null;
             this.acc12 = "";
             this.finish11 = "";
             this.finish12 = "";
@@ -115,10 +115,10 @@ public class HostTest {
         ws.send("{\"op\":\"open\",\"id\":" + cr.wireId + "}");
         String op #= HostTest.recvText(ws);
         JsonValue ov #= Json.parse(op);
-        cr.session = ov.object().get("session").asInt64();
+        cr.session #= "" + ov.object().get("session").asString();
 
         ws.send("{\"op\":\"generate\",\"id\":" + cr.wireId
-            + ",\"session\":" + cr.session + ",\"prompt\":\""
+            + ",\"session\":\"" + cr.session + "\",\"prompt\":\""
             + cr.prompt + "\",\"n\":6,\"temp\":0}");
         while (true) {
             String line #= HostTest.recvText(ws);
@@ -232,7 +232,8 @@ public class HostTest {
 
         Assert.isTrue(ca.sawAuthed);
         Assert.isTrue(cb.sawAuthed);
-        Assert.isTrue(ca.session != cb.session);
+        Assert.isTrue(ca.session != null && cb.session != null);
+        Assert.isFalse(ca.session.equals(cb.session));
         Assert.isTrue(ca.acc.equals(soloA));
         Assert.isTrue(cb.acc.equals(soloB));
         Assert.isTrue(ca.finish.byteLength() > 0);
@@ -319,7 +320,7 @@ public class HostTest {
         ws.send("{\"op\":\"open\",\"id\":31}");
         String op #= HostTest.recvText(ws);
         JsonValue ov #= Json.parse(op);
-        cr.session = ov.object().get("session").asInt64();
+        cr.session #= "" + ov.object().get("session").asString();
         sock.close();
         return 0;
     }
@@ -329,7 +330,7 @@ public class HostTest {
      *  through reclaim (7.1.3). */
     static async int32 runReclaimer(ClientRun cr, ClientRun dead) {
         int32 tries = 0;
-        while (dead.session < 0L && tries < 1000) {
+        while (dead.session == null && tries < 1000) {
             Fiber.sleep(Duration.ofMillis(5L));
             tries = tries + 1;
         }
@@ -347,7 +348,7 @@ public class HostTest {
         String op #= HostTest.recvText(ws);
         if (op != null && op.contains("\"session\"")) {
             JsonValue ov #= Json.parse(op);
-            cr.session = ov.object().get("session").asInt64();
+            cr.session #= "" + ov.object().get("session").asString();
         }
         ws.send("{\"op\":\"shutdown\"}");
         Fiber.sleep(Duration.ofMillis(200L));
@@ -370,9 +371,9 @@ public class HostTest {
         ws.send("{\"op\":\"open\",\"id\":" + cr.wireId + "}");
         String op #= HostTest.recvText(ws);
         JsonValue ov #= Json.parse(op);
-        cr.session = ov.object().get("session").asInt64();
+        cr.session #= "" + ov.object().get("session").asString();
         ws.send("{\"op\":\"generate\",\"id\":" + cr.wireId
-            + ",\"session\":" + cr.session + ",\"prompt\":\""
+            + ",\"session\":\"" + cr.session + "\",\"prompt\":\""
             + ConcurrencyTest.PROMPT_A + "\",\"n\":16,\"temp\":0}");
         int32 tries = 0;
         while (watched.finish.byteLength() == 0 && tries < 2000) {
@@ -401,7 +402,7 @@ public class HostTest {
         ws.send("{\"op\":\"open\",\"id\":10}");
         String op #= HostTest.recvText(ws);
         JsonValue ov #= Json.parse(op);
-        qr.session = ov.object().get("session").asInt64();
+        qr.session #= "" + ov.object().get("session").asString();
         // Back to back, no reads in between: 11 must still occupy the
         // one slot when 12 and 13 arrive behind it. A big budget on the
         // roomy engine keeps 11 in flight for a real interval, so 12
@@ -409,14 +410,14 @@ public class HostTest {
         // the 128-ctx toy, 11 finished before 12 was even dispatched on
         // a 2-core box, 12 took the freed slot, 13 was ADMITTED (never
         // shed), and the client waited forever for the CAPACITY error.
-        ws.send("{\"op\":\"generate\",\"id\":11,\"session\":" + qr.session
-            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
+        ws.send("{\"op\":\"generate\",\"id\":11,\"session\":\"" + qr.session
+            + "\",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
             + "\",\"n\":1500,\"temp\":0}");
-        ws.send("{\"op\":\"generate\",\"id\":12,\"session\":" + qr.session
-            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_B
+        ws.send("{\"op\":\"generate\",\"id\":12,\"session\":\"" + qr.session
+            + "\",\"prompt\":\"" + ConcurrencyTest.PROMPT_B
             + "\",\"n\":6,\"temp\":0}");
-        ws.send("{\"op\":\"generate\",\"id\":13,\"session\":" + qr.session
-            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
+        ws.send("{\"op\":\"generate\",\"id\":13,\"session\":\"" + qr.session
+            + "\",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
             + "\",\"n\":6,\"temp\":0}");
         while (true) {
             String line #= HostTest.recvText(ws);
@@ -498,10 +499,10 @@ public class HostTest {
             h.run();
             h.shutdown();
         }
-        Assert.isTrue(cv.session >= 0L);
-        Assert.isTrue(cr.session >= 0L);
+        Assert.isTrue(cv.session != null);
+        Assert.isTrue(cr.session != null);
         // A fresh session, not the leaked one handed back.
-        Assert.isTrue(cv.session != cr.session);
+        Assert.isFalse(cv.session.equals(cr.session));
     }
 
     /** 7.1.5 + 7.2.4 — beyond capacity a request queues and later runs

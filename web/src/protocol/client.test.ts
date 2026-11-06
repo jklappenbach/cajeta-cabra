@@ -103,18 +103,26 @@ describe('sessions and turns', () => {
     return h
   }
 
+  it('refuses an open reply whose session is not the issued string (§11.5)', async () => {
+    const h = await ready()
+    const sp = h.client.openSession()
+    const openReq = h.sock().last()
+    h.sock().reply({ id: openReq.id, session: 42 })
+    await expect(sp).rejects.toThrow()
+  })
+
   it('opens a session, then streams chunks and done with usage', async () => {
     const h = await ready()
     const sp = h.client.openSession()
     const openReq = h.sock().last()
     expect(openReq.op).toBe('open')
-    h.sock().reply({ id: openReq.id, session: 42 })
-    expect(await sp).toBe(42)
+    h.sock().reply({ id: openReq.id, session: 'q7Rk.AAAAAAAAACo.Zx81qW' })
+    expect(await sp).toBe('q7Rk.AAAAAAAAACo.Zx81qW')
 
     const chunks: string[] = []
     let finish = ''
     let usage: unknown = null
-    const turn = h.client.chat(42, [{ role: 'user', content: 'hi' }], { temp: 0, n: 8 }, {
+    const turn = h.client.chat('q7Rk.AAAAAAAAACo.Zx81qW', [{ role: 'user', content: 'hi' }], { temp: 0, n: 8 }, {
       onChunk: (t) => chunks.push(t),
       onDone: (f, u) => {
         finish = f
@@ -125,7 +133,7 @@ describe('sessions and turns', () => {
     })
     const req = h.sock().last()
     expect(req.op).toBe('chat')
-    expect(req.session).toBe(42)
+    expect(req.session).toBe('q7Rk.AAAAAAAAACo.Zx81qW')
     expect(req.messages).toEqual([{ role: 'user', content: 'hi' }])
     expect(req.temp).toBe(0)
     expect(req.n).toBe(8)
@@ -148,13 +156,13 @@ describe('sessions and turns', () => {
     const h = await ready()
     const a: string[] = []
     const b: string[] = []
-    const ta = h.client.chat(1, [{ role: 'user', content: 'a' }], {}, {
+    const ta = h.client.chat('s1', [{ role: 'user', content: 'a' }], {}, {
       onChunk: (t) => a.push(t),
       onDone: () => {},
       onError: () => {},
       onDiag: () => {},
     })
-    const tb = h.client.chat(2, [{ role: 'user', content: 'b' }], {}, {
+    const tb = h.client.chat('s2', [{ role: 'user', content: 'b' }], {}, {
       onChunk: (t) => b.push(t),
       onDone: () => {},
       onError: () => {},
@@ -171,7 +179,7 @@ describe('sessions and turns', () => {
   it('cancel sends the op and the turn ends with finish cancel (§10.5)', async () => {
     const h = await ready()
     let finish = ''
-    const t = h.client.chat(1, [{ role: 'user', content: 'x' }], {}, {
+    const t = h.client.chat('s1', [{ role: 'user', content: 'x' }], {}, {
       onChunk: () => {},
       onDone: (f) => {
         finish = f
@@ -190,7 +198,7 @@ describe('sessions and turns', () => {
     const h = await ready()
     let err = ''
     let finish = ''
-    const t = h.client.chat(1, [{ role: 'user', content: 'x' }], {}, {
+    const t = h.client.chat('s1', [{ role: 'user', content: 'x' }], {}, {
       onChunk: () => {},
       onDone: (f) => {
         finish = f
@@ -203,7 +211,7 @@ describe('sessions and turns', () => {
     h.sock().reply({ id: t.id, error: 'this model ships no chat template', kind: 'bad_request' })
     expect(err).toMatch(/template/)
     expect(t.done).toBe(true)
-    const t2 = h.client.chat(1, [{ role: 'user', content: 'y' }], {}, {
+    const t2 = h.client.chat('s1', [{ role: 'user', content: 'y' }], {}, {
       onChunk: () => {},
       onDone: (f) => {
         finish = f
@@ -219,7 +227,7 @@ describe('sessions and turns', () => {
   it('asks for diag only when told to, and routes diag lines to the turn (§10.9)', async () => {
     const h = await ready()
     const diags: unknown[] = []
-    const t = h.client.chat(1, [{ role: 'user', content: 'x' }], { diag: true }, {
+    const t = h.client.chat('s1', [{ role: 'user', content: 'x' }], { diag: true }, {
       onChunk: () => {},
       onDone: () => {},
       onError: () => {},
@@ -252,13 +260,13 @@ describe('reconnect and resume (§10.6)', () => {
     expect(h.client.state).toBe('ready')
     expect(states).toContain('reconnecting')
     // The next turn names the session it already held — no re-open.
-    const t = h.client.chat(42, [{ role: 'user', content: 'again' }], {}, {
+    const t = h.client.chat('q7Rk.AAAAAAAAACo.Zx81qW', [{ role: 'user', content: 'again' }], {}, {
       onChunk: () => {},
       onDone: () => {},
       onError: () => {},
       onDiag: () => {},
     })
-    expect(second.last().session).toBe(42)
+    expect(second.last().session).toBe('q7Rk.AAAAAAAAACo.Zx81qW')
     expect(second.last().id).toBe(t.id)
     expect(second.lastOp('open')).toBeUndefined()
   })
@@ -288,7 +296,7 @@ describe('reconnect and resume (§10.6)', () => {
     h.sock().reply({ authed: true })
     await p
     let finish = ''
-    h.client.chat(1, [{ role: 'user', content: 'x' }], {}, {
+    h.client.chat('s1', [{ role: 'user', content: 'x' }], {}, {
       onChunk: () => {},
       onDone: (f) => {
         finish = f
@@ -307,14 +315,14 @@ describe('reconnect and resume (§10.6)', () => {
     h.sock().reply({ authed: true })
     await p
     const notices: string[] = []
-    let newSession = -1
+    let newSession = ''
     const chunks: string[] = []
     const msgs = [
       { role: 'user', content: 'first' },
       { role: 'assistant', content: 'one' },
       { role: 'user', content: 'second' },
     ]
-    const t = h.client.chat(42, msgs, { n: 4 }, {
+    const t = h.client.chat('q7Rk.AAAAAAAAACo.Zx81qW', msgs, { n: 4 }, {
       onChunk: (c) => chunks.push(c),
       onDone: () => {},
       onError: () => {},
@@ -333,15 +341,15 @@ describe('reconnect and resume (§10.6)', () => {
     // Client opens a fresh session...
     const openReq = h.sock().last()
     expect(openReq.op).toBe('open')
-    h.sock().reply({ id: openReq.id, session: 77 })
+    h.sock().reply({ id: openReq.id, session: 'q7Rk.AAAAAAAAAE0.Mf3pLs' })
     await tick()
     // ...and resubmits the SAME messages on it, under the same turn.
     const re = h.sock().last()
     expect(re.op).toBe('chat')
-    expect(re.session).toBe(77)
+    expect(re.session).toBe('q7Rk.AAAAAAAAAE0.Mf3pLs')
     expect(re.messages).toEqual(msgs)
     expect(re.n).toBe(4)
-    expect(newSession).toBe(77)
+    expect(newSession).toBe('q7Rk.AAAAAAAAAE0.Mf3pLs')
     expect(notices.length).toBe(1)
     h.sock().reply({ id: re.id, chunk: 'ok' })
     expect(chunks).toEqual(['ok'])

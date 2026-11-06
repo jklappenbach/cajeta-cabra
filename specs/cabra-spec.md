@@ -203,7 +203,10 @@ sampling parameters, its in-flight turn. **The session id is part of the
 protocol contract** (Julian, 2026-08-30), on every transport.
 
 - **5.2.1** When a client opens a session, it receives a session id, and
-  every subsequent message names the session it belongs to.
+  every subsequent message names the session it belongs to. The id is an
+  opaque string the host issues (`"session":"<id>"`); a client stores it
+  and sends it back verbatim, and never constructs one (Julian,
+  2026-11-06, §11.5).
 - **5.2.2** A session is NOT bound to a connection. When a client
   reconnects, it resumes by naming its session id, and the host-side
   prefix cache is still warm.
@@ -470,9 +473,16 @@ primavera's own spec owns the framework.
   credential and the `DiagnosticBridge` are components with declared
   lifecycle; tests assemble a cabra from the same graph with a scripted
   engine, which is what unit 6's `MemChannel` tests do today by hand.
-- **11.5 Nothing the user can see changes.** The op set, session ids,
-  error kinds, and both transports behave byte-for-byte as before
-  (units 6–8's tests are the regression bar); only the assembly does.
+- **11.5 Nothing the user can see changes, except the session id.** The
+  op set, error kinds, and both transports behave byte-for-byte as before
+  (units 6–8's tests are the regression bar); only the assembly does. The
+  one change is the session id (Julian, 2026-11-06: "Use primavera's"):
+  it is primavera's issued id, `epoch.serial.mac`, carried as a JSON
+  string, where it was a number. A forged or guessed id then reads
+  `UNKNOWN` through the store's MAC rather than resolving to someone
+  else's session, and cabra keeps no id table of its own. The web client
+  and `serve --connect` change with it; a conversation saved in a browser
+  with a numeric id opens a fresh session.
 - **11.6 primavera ships what cabra needs first.** What cabra needs and
   primavera lacks is `primavera-live-sessions`: issued sessions, WebSocket
   lifecycle hooks, a byte-bounded send queue and a static mount, released

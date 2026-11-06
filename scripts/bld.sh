@@ -27,6 +27,13 @@ logging_ver="$(sed -n 's/.*"dev\.cajeta\.logging"[[:space:]]*:[[:space:]]*"\([^"
 LOGGING="${LOGGING:-$here/../cajeta-logging/build/archive/dev.cajeta.logging-$logging_ver.cja}"
 http_ver="$(sed -n 's/.*"dev\.cajeta\.http"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$here/cajeta.json" | head -1)"
 HTTP="${HTTP:-$here/../cajeta-http/build/archive/dev.cajeta.http-$http_ver.cja}"
+# http, cloud and primavera take crypto at the override; primavera takes cloud
+# at the override; primavera's archive carries self-tests that import unit.
+pin() { sed -n 's/.*"'"${1//./\\.}"'"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$here/cajeta.json" | head -1; }
+CRYPTO="${CRYPTO:-$OLLA_HOME/dev.cajeta.crypto/$(pin dev.cajeta.crypto)/dev.cajeta.crypto-$(pin dev.cajeta.crypto).cja}"
+CLOUD="${CLOUD:-$OLLA_HOME/dev.cajeta.cloud/$(pin dev.cajeta.cloud)/dev.cajeta.cloud-$(pin dev.cajeta.cloud).cja}"
+PRIMAVERA="${PRIMAVERA:-$here/../cajeta-primavera/build/archive/dev.cajeta.primavera-$(pin dev.cajeta.primavera).cja}"
+UNIT="${UNIT:-$OLLA_HOME/dev.cajeta.unit/$(pin dev.cajeta.unit)/dev.cajeta.unit-$(pin dev.cajeta.unit).cja}"
 LLM_SRC="${LLM_SRC:-$here/../cajeta-llm/src/main/cajeta}"
 
 mkdir -p "$here/tmp"
@@ -47,7 +54,7 @@ LOG="$here/tmp/bld-$(basename "$OUT").log"
     --classpath="$CODEC,$JINJA,$LOGGING" \
     dev.cajeta.llm.Llm.run "$LLM_SRC" "$here/tmp" > "$LOG" 2>&1
 "$CAJETA" --emit=exe --release --xpu-backend="$BE" \
-    --classpath="$here/tmp/llm-$BE.cja,$CODEC,$JINJA,$LOGGING,$HTTP" \
+    --classpath="$here/tmp/llm-$BE.cja,$CODEC,$JINJA,$LOGGING,$HTTP,$CRYPTO,$CLOUD,$PRIMAVERA,$UNIT" \
     -o "$OUT" dev.cajeta.cabra.Main.main \
     "$here/src/main/cajeta" "$here/tmp" >> "$LOG" 2>&1
 rc=$?

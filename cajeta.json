@@ -44,19 +44,25 @@
         "dependencies": {
             "dev.cajeta.llm": "0.1.8",
             "dev.cajeta.logging": "0.8.6",
-            "dev.cajeta.http": "0.9.0"
+            "dev.cajeta.http": "0.9.1",
+            // The application framework (spec §11): sessions, the web
+            // server, typed endpoints and the WebSocket lifecycle.
+            "dev.cajeta.primavera": "0.5.1"
         },
 
         "dev-dependencies": {
             "dev.cajeta.unit": "0.3.6"
         },
 
-        // llm 0.1.8 and http 0.9.0 both pin codec 0.8.7, and http 0.9.0 pins
-        // crypto 0.1.0. The overrides keep one of each for the graph if a
-        // future dep pin drifts; run-tests.sh fetches crypto at this pin.
+        // llm 0.1.8 and http 0.9.1 both pin codec 0.8.7; http 0.9.1, cloud
+        // 0.4.0 and primavera 0.5.1 pin crypto 0.1.0, and primavera 0.5.1
+        // pins cloud 0.4.0. The overrides keep one of each for the graph if a
+        // future dep pin drifts; run-tests.sh fetches crypto and cloud at
+        // these pins.
         "overrides": {
             "dev.cajeta.codec": "0.8.7",
-            "dev.cajeta.crypto": "0.1.0"
+            "dev.cajeta.crypto": "0.1.0",
+            "dev.cajeta.cloud": "0.4.0"
         },
 
         "repositories": [

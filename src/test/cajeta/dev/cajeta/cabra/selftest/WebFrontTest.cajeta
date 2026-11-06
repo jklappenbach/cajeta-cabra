@@ -213,9 +213,9 @@ public class WebFrontTest {
         ws.send("{\"op\":\"open\",\"id\":3}");
         String op #= HostTest.recvText(ws);
         JsonValue ov #= Json.parse(op);
-        int64 sid = ov.object().get("session").asInt64();
-        ws.send("{\"op\":\"generate\",\"id\":3,\"session\":" + sid
-            + ",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
+        String sid #= "" + ov.object().get("session").asString();
+        ws.send("{\"op\":\"generate\",\"id\":3,\"session\":\"" + sid
+            + "\",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
             + "\",\"n\":3,\"temp\":0}");
         while (true) {
             String line #= HostTest.recvText(ws);

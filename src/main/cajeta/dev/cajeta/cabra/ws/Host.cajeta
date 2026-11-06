@@ -15,7 +15,7 @@ import dev.cajeta.llm.chat.ChatTemplate;
 import dev.cajeta.llm.gen.SampleParams;
 import dev.cajeta.llm.gen.TokenSink;
 import dev.cajeta.llm.sched.Request;
-import dev.cajeta.cabra.core.SessionRegistry;
+import dev.cajeta.cabra.core.Sessions;
 import dev.cajeta.cabra.diag.DiagQueue;
 import dev.cajeta.cabra.diag.DiagnosticBridge;
 import dev.cajeta.cabra.io.Utf8Chunker;
@@ -51,7 +51,7 @@ import dev.cajeta.cabra.ChatOp;
 public final class Host implements TokenSink {
 
     LlmEngine engine;          // owned
-    SessionRegistry reg;       // owned
+    Sessions reg;              // owned
     String token;              // "" = auth disabled
     String state;
 
@@ -100,7 +100,7 @@ public final class Host implements TokenSink {
     public Host(#LlmEngine engine, String token, int32 maxConns,
             int32 maxSessions, int64 idleExpiryMs) {
         this.engine #= engine;
-        this.reg = heap SessionRegistry(maxSessions, idleExpiryMs);
+        this.reg = heap Sessions(maxSessions, idleExpiryMs);
         this.token #= token;
         this.state = "ready";
         this.maxConns = maxConns;
@@ -385,8 +385,8 @@ public final class Host implements TokenSink {
             return;
         }
         if (r.op.equals("open")) {
-            int64 sid = this.reg.open(nowMs);
-            if (sid < 0L) {
+            String sid #= this.reg.open(nowMs);
+            if (sid == null) {
                 String m #= Wire.error(r.id, r.hasId, ErrKind.CAPACITY,
                     "no session slot free", false);
                 this.say(connSlot, m);
@@ -397,7 +397,7 @@ public final class Host implements TokenSink {
             return;
         }
         if (r.op.equals("close")) {
-            if (!r.hasSession || !this.reg.close(r.session)) {
+            if (!r.hasSession || !this.reg.close(r.session, nowMs)) {
                 String m #= Wire.error(r.id, r.hasId,
                     ErrKind.SESSION_GONE, "close: no such open session",
                     false);
@@ -427,8 +427,8 @@ public final class Host implements TokenSink {
         // generate / chat.
         if (r.hasSession) {
             int32 st = this.reg.touch(r.session, nowMs);
-            if (st != SessionRegistry.OPEN) {
-                String why = st == SessionRegistry.GONE
+            if (st != Sessions.OPEN) {
+                String why = st == Sessions.GONE
                     ? "session expired or closed - open a new one and resend context"
                     : "unknown session id - never issued by this host";
                 String m #= Wire.error(r.id, r.hasId,
@@ -578,7 +578,7 @@ public final class Host implements TokenSink {
             }
             if (qr.hasSession) {
                 int32 st = this.reg.touch(qr.session, nowMs);
-                if (st != SessionRegistry.OPEN) {
+                if (st != Sessions.OPEN) {
                     String m #= Wire.error(qr.id, qr.hasId,
                         ErrKind.SESSION_GONE,
                         "session expired while the request was queued",

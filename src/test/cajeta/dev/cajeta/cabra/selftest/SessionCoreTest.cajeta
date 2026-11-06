@@ -29,7 +29,7 @@ public class SessionCoreTest {
             this.chunksBeforeFault = 0 - 1;
             this.msg = "fault";
         }
-        public String turn(int64 session, Req r, TurnEmit e) {
+        public String turn(String session, Req r, TurnEmit e) {
             this.turns = this.turns + 1;
             int32 i = 0;
             while (i < 2) {
@@ -37,7 +37,8 @@ public class SessionCoreTest {
                         && i >= this.chunksBeforeFault) {
                     throw heap LlmException(this.msg);
                 }
-                e.chunk("s" + session + "-" + r.prompt + "-" + i);
+                String tag = session == null ? "none" : session;
+                e.chunk("s" + tag + "-" + r.prompt + "-" + i);
                 i = i + 1;
             }
             if (this.chunksBeforeFault >= 0) {
@@ -52,6 +53,26 @@ public class SessionCoreTest {
     static #ServeCore core(FakePort p) {
         ServeCore c = heap ServeCore(2, 1000L, p);
         return #c;
+    }
+
+    /** The session id an `open` answered with on output line `i`. */
+    static #String sidAt(MemChannel ch, int32 i) {
+        String line = ch.outAt(i);
+        String key = "\"session\":\"";
+        int64 at = line.indexOf(key);
+        Assert.isTrue(at >= 0L);
+        int64 from = at + key.byteLength();
+        int64 end = line.indexOfFrom("\"", from);
+        String out #= line.substring((int32) from, (int32) end);
+        return #out;
+    }
+
+    /** A generate line naming session `sid`. */
+    static #String gen(int32 id, String sid, String prompt) {
+        String out #= "{\"op\":\"generate\",\"id\":" + id
+            + ",\"session\":\"" + sid + "\",\"prompt\":\"" + prompt
+            + "\",\"n\":2}";
+        return #out;
     }
 
     static boolean anyOutContains(MemChannel ch, String needle) {
@@ -71,10 +92,10 @@ public class SessionCoreTest {
         ServeCore c #= SessionCoreTest.core(p);
         MemChannel ch = heap MemChannel();
         c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
-        Assert.isTrue(ch.outAt(0).contains("\"session\":1"));
-        c.handle("{\"op\":\"generate\",\"id\":2,\"session\":1,"
-            + "\"prompt\":\"a\",\"n\":2}", 10L, ch);
-        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s1-a-0"));
+        Assert.isTrue(ch.outAt(0).contains("{\"id\":1,\"session\":\""));
+        String sid #= SessionCoreTest.sidAt(ch, 0);
+        c.handle(SessionCoreTest.gen(2, sid, "a"), 10L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s" + sid + "-a-0"));
         Assert.isTrue(SessionCoreTest.anyOutContains(ch,
             "\"finish\":\"eos\""));
         Assert.equals(1L, (int64) p.turns);
@@ -88,13 +109,13 @@ public class SessionCoreTest {
         ServeCore c #= SessionCoreTest.core(p);
         MemChannel ch1 = heap MemChannel();
         c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch1);
+        String sid #= SessionCoreTest.sidAt(ch1, 0);
         ch1.closeChannel();
 
         MemChannel ch2 = heap MemChannel();
-        c.handle("{\"op\":\"generate\",\"id\":3,\"session\":1,"
-            + "\"prompt\":\"b\",\"n\":2}", 100L, ch2);
-        Assert.isTrue(SessionCoreTest.anyOutContains(ch2, "s1-b-0"));
-        Assert.equals(1, c.registry().openCount());
+        c.handle(SessionCoreTest.gen(3, sid, "b"), 100L, ch2);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch2, "s" + sid + "-b-0"));
+        Assert.equals(1, c.sessions().openCount());
     }
 
     /** 6.1.3 — an expired or unknown session is REFUSED explicitly,
@@ -105,19 +126,18 @@ public class SessionCoreTest {
         ServeCore c #= SessionCoreTest.core(p);
         MemChannel ch = heap MemChannel();
         c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        String sid #= SessionCoreTest.sidAt(ch, 0);
         // Idle past the 1000ms expiry; the next message reclaims it.
-        c.handle("{\"op\":\"generate\",\"id\":2,\"session\":1,"
-            + "\"prompt\":\"x\",\"n\":2}", 5000L, ch);
+        c.handle(SessionCoreTest.gen(2, sid, "x"), 5000L, ch);
         Assert.isTrue(SessionCoreTest.anyOutContains(ch,
             ErrKind.SESSION_GONE));
         Assert.isTrue(SessionCoreTest.anyOutContains(ch, "expired"));
         // Never issued: a different refusal, same kind.
-        c.handle("{\"op\":\"generate\",\"id\":3,\"session\":77,"
-            + "\"prompt\":\"x\",\"n\":2}", 5001L, ch);
+        c.handle(SessionCoreTest.gen(3, "77", "x"), 5001L, ch);
         Assert.isTrue(SessionCoreTest.anyOutContains(ch, "unknown"));
         // Neither ran a turn, and no fresh session appeared.
         Assert.equals(0L, (int64) p.turns);
-        Assert.equals(0, c.registry().openCount());
+        Assert.equals(0, c.sessions().openCount());
     }
 
     /** 6.1.4 — expiry returns the slot to the pool: a full registry
@@ -135,8 +155,8 @@ public class SessionCoreTest {
         // Both idle out; the next open succeeds.
         c.handle("{\"op\":\"open\",\"id\":4}", 9000L, ch);
         Assert.isTrue(SessionCoreTest.anyOutContains(ch,
-            "\"id\":4,\"session\":3"));
-        Assert.equals(1, c.registry().openCount());
+            "{\"id\":4,\"session\":\""));
+        Assert.equals(1, c.sessions().openCount());
     }
 
     /** 6.1.5 — two sessions on ONE channel do not perturb each other:
@@ -146,17 +166,18 @@ public class SessionCoreTest {
         FakePort p = heap FakePort();
         ServeCore c #= SessionCoreTest.core(p);
         MemChannel ch = heap MemChannel();
-        ch.pushIn("{\"op\":\"open\",\"id\":1}");
-        ch.pushIn("{\"op\":\"open\",\"id\":2}");
-        ch.pushIn("{\"op\":\"generate\",\"id\":3,\"session\":1,"
-            + "\"prompt\":\"a\",\"n\":2}");
-        ch.pushIn("{\"op\":\"generate\",\"id\":4,\"session\":2,"
-            + "\"prompt\":\"b\",\"n\":2}");
+        c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        c.handle("{\"op\":\"open\",\"id\":2}", 0L, ch);
+        String s1 #= SessionCoreTest.sidAt(ch, 0);
+        String s2 #= SessionCoreTest.sidAt(ch, 1);
+        Assert.isFalse(s1.equals(s2));
+        ch.pushIn(SessionCoreTest.gen(3, s1, "a"));
+        ch.pushIn(SessionCoreTest.gen(4, s2, "b"));
         c.serveChannel(ch, 0L);
-        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s1-a-0"));
-        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s2-b-0"));
-        Assert.isFalse(SessionCoreTest.anyOutContains(ch, "s1-b"));
-        Assert.isFalse(SessionCoreTest.anyOutContains(ch, "s2-a"));
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s" + s1 + "-a-0"));
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s" + s2 + "-b-0"));
+        Assert.isFalse(SessionCoreTest.anyOutContains(ch, "s" + s1 + "-b"));
+        Assert.isFalse(SessionCoreTest.anyOutContains(ch, "s" + s2 + "-a"));
     }
 
     /** 6.1.6 — each kind from the condition that should produce it,
@@ -169,17 +190,16 @@ public class SessionCoreTest {
         c.handle("this is not json", 0L, ch);
         Assert.isTrue(ch.outAt(0).contains(ErrKind.BAD_REQUEST));
         c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        String sid #= SessionCoreTest.sidAt(ch, 1);
         c.handle("{\"op\":\"open\",\"id\":2}", 0L, ch);
         c.handle("{\"op\":\"open\",\"id\":3}", 1L, ch);
         Assert.isTrue(SessionCoreTest.anyOutContains(ch,
             ErrKind.CAPACITY));
-        c.handle("{\"op\":\"generate\",\"id\":5,\"session\":99,"
-            + "\"prompt\":\"x\"}", 2L, ch);
+        c.handle(SessionCoreTest.gen(5, "99", "x"), 2L, ch);
         Assert.isTrue(SessionCoreTest.anyOutContains(ch,
             ErrKind.SESSION_GONE));
         p.chunksBeforeFault = 0;
-        c.handle("{\"op\":\"generate\",\"id\":6,\"session\":1,"
-            + "\"prompt\":\"x\"}", 3L, ch);
+        c.handle(SessionCoreTest.gen(6, sid, "x"), 3L, ch);
         Assert.isTrue(SessionCoreTest.anyOutContains(ch,
             ErrKind.INTERNAL));
     }
@@ -192,19 +212,18 @@ public class SessionCoreTest {
         ServeCore c #= SessionCoreTest.core(p);
         MemChannel ch = heap MemChannel();
         c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        String sid #= SessionCoreTest.sidAt(ch, 0);
         // Fault BEFORE any chunk: an error object, no done line.
         p.chunksBeforeFault = 0;
-        c.handle("{\"op\":\"generate\",\"id\":2,\"session\":1,"
-            + "\"prompt\":\"x\"}", 1L, ch);
+        c.handle(SessionCoreTest.gen(2, sid, "x"), 1L, ch);
         Assert.isTrue(SessionCoreTest.anyOutContains(ch,
             ErrKind.INTERNAL));
         Assert.isFalse(SessionCoreTest.anyOutContains(ch,
             "\"finish\":\"error\""));
         // Fault AFTER one chunk: a terminating done with reason error.
         p.chunksBeforeFault = 1;
-        c.handle("{\"op\":\"generate\",\"id\":3,\"session\":1,"
-            + "\"prompt\":\"y\"}", 2L, ch);
-        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s1-y-0"));
+        c.handle(SessionCoreTest.gen(3, sid, "y"), 2L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s" + sid + "-y-0"));
         Assert.isTrue(SessionCoreTest.anyOutContains(ch,
             "\"finish\":\"error\""));
     }
@@ -220,11 +239,60 @@ public class SessionCoreTest {
         ServeCore c #= SessionCoreTest.core(p);
         MemChannel ch = heap MemChannel();
         c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
-        c.handle("{\"op\":\"generate\",\"id\":2,\"session\":1,"
-            + "\"prompt\":\"x\"}", 1L, ch);
+        String sid #= SessionCoreTest.sidAt(ch, 0);
+        c.handle(SessionCoreTest.gen(2, sid, "x"), 1L, ch);
         // The throw's text NAMES other kinds; the answer is still
         // internal, because the kind came from the seam, not the text.
         Assert.isTrue(SessionCoreTest.anyOutContains(ch,
             ErrKind.INTERNAL));
+    }
+
+    /** Plan 12.1.1, spec §11.5: an id of the issued shape that this host
+     *  did not issue (one character of its MAC changed) is UNKNOWN, not
+     *  someone else's session, and runs no turn. */
+    @Test
+    public void aForgedIdOfTheIssuedShapeIsUnknown() {
+        FakePort p = heap FakePort();
+        ServeCore c #= SessionCoreTest.core(p);
+        MemChannel ch = heap MemChannel();
+        c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        String sid #= SessionCoreTest.sidAt(ch, 0);
+        int32 last = (int32) sid.byteLength() - 1;
+        String keep #= sid.substring(0, last);
+        String tail #= sid.substring(last, last + 1);
+        String forged #= keep + (tail.equals("A") ? "B" : "A");
+        c.handle(SessionCoreTest.gen(2, forged, "x"), 1L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "unknown"));
+        Assert.equals(0L, (int64) p.turns);
+        // The real session is untouched.
+        c.handle(SessionCoreTest.gen(3, sid, "y"), 2L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, "s" + sid + "-y-0"));
+    }
+
+    /** Plan 12.1.6: a session that ends leaves the store through the
+     *  eviction observer once, with its reason. */
+    @Test
+    public void endedSessionsLeaveThroughTheEvictionObserver() {
+        FakePort p = heap FakePort();
+        ServeCore c #= SessionCoreTest.core(p);
+        MemChannel ch = heap MemChannel();
+        c.handle("{\"op\":\"open\",\"id\":1}", 0L, ch);
+        c.handle("{\"op\":\"open\",\"id\":2}", 0L, ch);
+        String s1 #= SessionCoreTest.sidAt(ch, 0);
+        c.handle("{\"op\":\"close\",\"id\":3,\"session\":\"" + s1 + "\"}",
+            1L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch,
+            "{\"id\":3,\"closed\":\"" + s1 + "\"}"));
+        Assert.equals(1, c.sessions().closedCount());
+        Assert.equals(0, c.sessions().expiredCount());
+        // The other idles out on the next message.
+        c.handle("{\"op\":\"health\",\"id\":4}", 9000L, ch);
+        Assert.equals(1, c.sessions().expiredCount());
+        Assert.equals(0, c.sessions().openCount());
+        // Closing it again is refused: it is gone, not open.
+        c.handle("{\"op\":\"close\",\"id\":5,\"session\":\"" + s1 + "\"}",
+            9001L, ch);
+        Assert.isTrue(SessionCoreTest.anyOutContains(ch, ErrKind.SESSION_GONE));
+        Assert.equals(1, c.sessions().closedCount());
     }
 }

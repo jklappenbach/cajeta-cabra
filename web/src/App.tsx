@@ -119,7 +119,7 @@ export default function App() {
       return n
     })
 
-    const start = (session: number) => {
+    const start = (session: string) => {
       const turn = client.chat(session, messages, target!.params, {
         onChunk: (t) => {
           const l = liveRef.current

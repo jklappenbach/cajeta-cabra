@@ -1,0 +1,94 @@
+package dev.cajeta.cabra.core;
+
+import cajeta.lang.String;
+import dev.cajeta.primavera.context.SessionState;
+import dev.cajeta.primavera.context.SessionStore;
+
+/**
+ * cabra's sessions (spec §5.2) as a primavera `SessionStore` (spec §11.1,
+ * plan 12.2.2): store-issued ids, idle expiry, a capacity cap and the
+ * three-valued lookup §5.2.5 needs. This class is the one interface the
+ * host and the core hold sessions through, so an engine-side multiplexer
+ * can replace it (§11.6.2). It keeps no id table: OPEN, GONE and UNKNOWN
+ * come from the store, which tells an ended issued id from a forged one by
+ * its MAC.
+ *
+ * Time is a PARAMETER, never read here: the store's `...At(now)` forms take
+ * it, so expiry is testable with a scripted clock and the caller owns "now".
+ *
+ * Sessions leave the store through its eviction observer, which counts them
+ * by reason; the store logs each one (§8.6). Host-side KV is a cache, never
+ * pinned per session (§5.2.8), so there is no slot to return beyond the
+ * store's own.
+ */
+public final class Sessions {
+
+    public static final int32 OPEN = 0;
+    public static final int32 GONE = 1;
+    public static final int32 UNKNOWN = 2;
+
+    SessionStore store;     // owned
+    EvictionTally tally;    // owned; the observer's counters
+
+    public Sessions(int32 capacity, int64 idleExpiryMs) {
+        this.store = heap SessionStore();
+        this.store.setCapacity(capacity);
+        this.store.setIdleTtl(idleExpiryMs);
+        this.tally = heap EvictionTally();
+        EvictionTally t = this.tally;
+        this.store.setEvictionObserver(
+            (String id, int32 reason) -> EvictionTally.note(t, id, reason));
+        return;
+    }
+
+    /** Open a session: its issued id, or null when every slot is held
+     *  (the caller answers with kind=capacity). */
+    public #String open(int64 nowMs) {
+        String id #= this.store.openAt(nowMs);
+        return #id;
+    }
+
+    /** Resolve `id` and, when OPEN, refresh its idle clock. A session past
+     *  its idle bound is evicted here and answers GONE. */
+    public int32 touch(String id, int64 nowMs) {
+        SessionState st = this.store.lookupAt(id, nowMs);
+        if (st == SessionState.OPEN) {
+            return Sessions.OPEN;
+        }
+        if (st == SessionState.GONE) {
+            return Sessions.GONE;
+        }
+        return Sessions.UNKNOWN;
+    }
+
+    /** Close an open session explicitly (§5.2.3). False when it is not
+     *  open: gone, unknown, or already closed. */
+    public boolean close(String id, int64 nowMs) {
+        if (this.touch(id, nowMs) != Sessions.OPEN) {
+            return false;
+        }
+        this.store.invalidate(id);
+        return true;
+    }
+
+    /** Reclaim every session idle past expiry (§5.2.4), the only
+     *  reclamation for a client that vanished. Returns how many. */
+    public int32 expire(int64 nowMs) {
+        return this.store.evictExpiredAt(nowMs);
+    }
+
+    /** Sessions held now. */
+    public int32 openCount() {
+        return this.store.count();
+    }
+
+    /** Sessions closed explicitly, as the eviction observer saw them. */
+    public int32 closedCount() {
+        return this.tally.closed;
+    }
+
+    /** Sessions that idled out, as the eviction observer saw them. */
+    public int32 expiredCount() {
+        return this.tally.expired;
+    }
+}

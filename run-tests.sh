@@ -139,10 +139,21 @@ http_manifest="$here/cajeta.json"
 crypto_ver="$(pin_in "$http_manifest" dev.cajeta.crypto)"
 [[ -n "$crypto_ver" ]] || { echo "no dev.cajeta.crypto pin in $http_manifest" >&2; exit 1; }
 fetch_pinned dev.cajeta.crypto "$crypto_ver"; crypto_cja="$RESOLVED"
+# The application framework (spec §11). A primavera checkout is built like the
+# other siblings; otherwise the published archive at cabra's pin. Its cloud is
+# always the published archive at cabra's override, which is primavera's pin.
+# primavera's archive carries its self-tests, which import cajeta-unit, so
+# unit is on the library's classpath as well as the test binary's.
+resolve dev.cajeta.primavera "${PRIMAVERA_REPO:-$here/../cajeta-primavera}"; primavera_cja="$RESOLVED"
+cloud_ver="$(pin_in "$here/cajeta.json" dev.cajeta.cloud)"
+[[ -n "$cloud_ver" ]] || { echo "no dev.cajeta.cloud override in cajeta.json" >&2; exit 1; }
+fetch_pinned dev.cajeta.cloud "$cloud_ver"; cloud_cja="$RESOLVED"
 echo ">> unit: $unit_cja"
 echo ">> codec: $codec_cja"
 echo ">> jinja: $jinja_cja"
 echo ">> logging: $logging_cja"
+echo ">> primavera: $primavera_cja"
+echo ">> cloud: $cloud_cja"
 
 # The engine: no `cajeta build` task emits its .cja with deps wired, so
 # build it the way its own run-tests.sh does — one --emit=cja over its
@@ -169,12 +180,12 @@ echo ">> engine: $llm_cja"
 # a source tree; a hard error in the compiler as of c963d19b.)
 echo ">> building cabra library .cja"
 "$CAJETA" --emit=cja -o "$out/cabra.cja" \
-    --classpath="$llm_cja,$codec_cja,$jinja_cja,$logging_cja,$http_cja,$crypto_cja" \
+    --classpath="$llm_cja,$codec_cja,$jinja_cja,$logging_cja,$http_cja,$crypto_cja,$primavera_cja,$cloud_cja,$unit_cja" \
     dev.cajeta.cabra.Main.main "$here/src/main/cajeta" "$out" >/dev/null
 
 echo ">> building + running the cabra test binary"
 "$CAJETA" --emit=exe --profile=test --xpu-backend="$XPU_BACKEND" \
-    --classpath="$out/cabra.cja,$llm_cja,$unit_cja,$codec_cja,$jinja_cja,$logging_cja,$http_cja,$crypto_cja" \
+    --classpath="$out/cabra.cja,$llm_cja,$unit_cja,$codec_cja,$jinja_cja,$logging_cja,$http_cja,$crypto_cja,$primavera_cja,$cloud_cja" \
     -o "$out/cabratests" \
     dev.cajeta.cabra.selftest.TestMain.run \
     "$here/src/test/cajeta" "$out" >/dev/null

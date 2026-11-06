@@ -66,7 +66,7 @@ export interface TurnHandlers {
   /** §10.6: the host said the session was gone; the client opened
    *  `newSession` and resubmitted this turn's whole conversation on it.
    *  Absent, a gone session is reported through onError instead. */
-  onSessionReplaced?: (newSession: number, why: string) => void
+  onSessionReplaced?: (newSession: string, why: string) => void
 }
 
 export interface Turn {
@@ -82,7 +82,7 @@ export interface Health {
 
 interface TurnRec {
   id: number
-  session: number
+  session: string
   messages: Message[]
   params: TurnParams
   h: TurnHandlers
@@ -133,7 +133,7 @@ export class CabraClient {
   private authed = false
   private nextId = 1
   private turns = new Map<number, TurnRec>()
-  private opens = new Map<number, Pending<number>>()
+  private opens = new Map<number, Pending<string>>()
   private healths = new Map<number, Pending<Health>>()
   private connectWaiters: Pending<void>[] = []
   private attempts = 0
@@ -261,7 +261,7 @@ export class CabraClient {
     const open = this.opens.get(id)
     if (open) {
       this.opens.delete(id)
-      if (typeof o.session === 'number') open.resolve(o.session)
+      if (typeof o.session === 'string') open.resolve(o.session)
       else open.reject(new Error(String(o.error ?? 'open failed')))
       return
     }
@@ -340,9 +340,9 @@ export class CabraClient {
     this.sock.send(JSON.stringify(o))
   }
 
-  openSession(): Promise<number> {
+  openSession(): Promise<string> {
     const id = this.nextId++
-    return new Promise<number>((resolve, reject) => {
+    return new Promise<string>((resolve, reject) => {
       this.opens.set(id, { resolve, reject })
       try {
         this.send({ op: 'open', id })
@@ -353,7 +353,7 @@ export class CabraClient {
     })
   }
 
-  closeSession(session: number): void {
+  closeSession(session: string): void {
     const id = this.nextId++
     try {
       this.send({ op: 'close', id, session })
@@ -397,7 +397,7 @@ export class CabraClient {
   /** One turn: the whole conversation (state is client-side, §5.2.8)
    *  rendered by the host's chat template. Returns immediately; the
    *  handlers carry the stream. */
-  chat(session: number, messages: Message[], params: TurnParams, h: TurnHandlers): Turn {
+  chat(session: string, messages: Message[], params: TurnParams, h: TurnHandlers): Turn {
     const id = this.nextId++
     const rec: TurnRec = {
       id,

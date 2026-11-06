@@ -116,7 +116,7 @@ public final class Main {
         boolean verbose = false;
         String connect = "";
         String token = "";
-        int64 session = 0L - 1L;
+        String session = null;     // --session: the host's issued id
         int32 i = 1;
         while (i < (int32) args.count()) {
             String a = args[i];
@@ -145,7 +145,7 @@ public final class Main {
             } else if (a.equals("--session")
                     && i + 1 < (int32) args.count()) {
                 i = i + 1;
-                session = (int64) Integer.parseInt(args[i]);
+                session = args[i];
             } else if (a.equals("--verbose")) {
                 // A BARE toggle — unlike every flag above it, this one
                 // takes no value, so it must not advance `i`.
@@ -383,7 +383,7 @@ public final class Main {
             + "[--ctx N] [--max-seqs N] [--device <backend>] "
             + "[--verbose]");
         System.stderr.println("       cabra serve --connect "
-            + "[127.0.0.1:]PORT [--token T] [--session N] [--verbose]");
+            + "[127.0.0.1:]PORT [--token T] [--session ID] [--verbose]");
         System.stderr.println("       cabra host --model <path> "
             + "[--port N] [--token T] [--ctx N] [--max-seqs N] "
             + "[--max-conns N] [--idle-expiry MS] [--kv-store DIR] "
