@@ -75,6 +75,7 @@ public final class Host implements TokenSink {
     boolean[] trOpen;
     boolean[] trDiag;          // §10.9: this request asked for records
     int32 idleSteps;
+    int32[] oneTok;            // the token id decode reads, reused per token
 
     // 7.2.4: past in-flight capacity a request QUEUES (a bounded FIFO of
     // the parsed requests themselves, moved, never copied); past the
@@ -119,6 +120,7 @@ public final class Host implements TokenSink {
         this.trOpen = heap boolean[this.cap];
         this.trDiag = heap boolean[this.cap];
         this.idleSteps = 0;
+        this.oneTok = null;
         this.diagQ = null;
         this.diagBridge = null;
         this.diagAlways = false;
@@ -630,8 +632,7 @@ public final class Host implements TokenSink {
                 if (q.finishReason() != Request.FINISH_NONE) {
                     this.ensureChunker();
                     if (this.chunker.hasTail(i)) {
-                        String tailS #= this.chunker.take(i,
-                            Utf8Chunker.emptyBytes(), true);
+                        String tailS #= this.chunker.flushTail(i);
                         if (tailS.byteLength() > 0) {
                             String tm #= Wire.chunk(this.trId[i], tailS);
                             this.say(this.trConn[i], #tm);
@@ -741,10 +742,12 @@ public final class Host implements TokenSink {
                     this.trFirstNs[i] = Clock.nanoTime();
                 }
                 this.ensureChunker();
-                int32[] one #= heap int32[1];
-                one[0] = tok;
-                int8[] raw #= this.engine.tokenizer().decode(one, 1);
-                String s #= this.chunker.take(i, raw, false);
+                if (this.oneTok == null) {
+                    this.oneTok = heap int32[1];
+                }
+                this.oneTok[0] = tok;
+                int8[] raw #= this.engine.tokenizer().decode(this.oneTok, 1);
+                String s #= this.chunker.takeOwned(i, #raw);
                 if (s.byteLength() > 0) {
                     String m #= Wire.chunk(this.trId[i], s);
                     this.say(this.trConn[i], #m);

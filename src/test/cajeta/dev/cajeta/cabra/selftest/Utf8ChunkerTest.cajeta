@@ -1,0 +1,121 @@
+package dev.cajeta.cabra.selftest;
+
+import cajeta.lang.String;
+import dev.cajeta.unit.Assert;
+import dev.cajeta.unit.Test;
+import dev.cajeta.cabra.io.Utf8Chunker;
+
+/**
+ * The UTF-8 hold-back between decoded tokens and streamed chunks: what
+ * reaches the wire is always whole characters, a character split across
+ * tokens is held until it completes, and a byte that can never be valid
+ * is U+FFFD. `takeOwned` is the per-token form: when nothing is held and
+ * the token's bytes are whole and valid, the chunk IS the decoded array,
+ * with nothing copied.
+ */
+public class Utf8ChunkerTest {
+
+    public Utf8ChunkerTest() { return; }
+
+    static #int8[] bytesOf(String s) {
+        int8[] b #= s.toBytes();
+        return #b;
+    }
+
+    @Test
+    public void asciiPassesThrough() {
+        Utf8Chunker c = heap Utf8Chunker(2);
+        int8[] raw #= Utf8ChunkerTest.bytesOf("hello");
+        String s #= c.take(0, raw, false);
+        Assert.equals("hello", s);
+        Assert.isFalse(c.hasTail(0));
+    }
+
+    @Test
+    public void aSplitCharacterIsHeldThenCompleted() {
+        Utf8Chunker c = heap Utf8Chunker(2);
+        int8[] whole #= Utf8ChunkerTest.bytesOf("é");   // c3 a9
+        int8[] first = heap int8[1];
+        first[0] = whole[0];
+        int8[] second = heap int8[1];
+        second[0] = whole[1];
+        String a #= c.take(0, first, false);
+        Assert.equals(0, a.byteLength());
+        Assert.isTrue(c.hasTail(0));
+        String b #= c.take(0, second, false);
+        Assert.equals("é", b);
+        Assert.isFalse(c.hasTail(0));
+    }
+
+    @Test
+    public void anInvalidByteIsTheReplacementCharacter() {
+        Utf8Chunker c = heap Utf8Chunker(1);
+        int8[] raw = heap int8[3];
+        raw[0] = (int8) 97;
+        raw[1] = (int8) (0 - 1);     // 0xff never starts a character
+        raw[2] = (int8) 98;
+        String s #= c.take(0, raw, false);
+        Assert.equals("a�b", s);
+    }
+
+    /** FIRES on the old flush, which passed `emptyBytes()` (one zero
+     *  byte) to `take` and so ended the tail with a NUL. */
+    @Test
+    public void aFlushedTailIsTheReplacementCharacterAndNothingElse() {
+        Utf8Chunker c = heap Utf8Chunker(1);
+        int8[] whole #= Utf8ChunkerTest.bytesOf("中");   // 3 bytes
+        int8[] part = heap int8[2];
+        part[0] = whole[0];
+        part[1] = whole[1];
+        String a #= c.take(0, part, false);
+        Assert.equals(0, a.byteLength());
+        String t #= c.flushTail(0);
+        Assert.equals(6, t.byteLength());
+        Assert.equals("��", t);
+        Assert.isFalse(c.hasTail(0));
+    }
+
+    /** FIRES: with nothing held and whole, valid bytes, the chunk is the
+     *  decoded array itself. (Longer than 12 bytes, so the String keeps
+     *  a root rather than storing inline.) */
+    @Test
+    public void takeOwnedWrapsTheDecodedArrayWithoutACopy() {
+        Utf8Chunker c = heap Utf8Chunker(1);
+        int8[] raw #= Utf8ChunkerTest.bytesOf("a token of café text");
+        int8[] alias = raw;
+        String s #= c.takeOwned(0, #raw);
+        Assert.equals("a token of café text", s);
+        Assert.isTrue(s.root() == alias);
+    }
+
+    /** DOES NOT take the fast path when it would be wrong: a held tail
+     *  must merge, and the result is the merged character. */
+    @Test
+    public void takeOwnedMergesAHeldTail() {
+        Utf8Chunker c = heap Utf8Chunker(1);
+        int8[] whole #= Utf8ChunkerTest.bytesOf("é");
+        int8[] first = heap int8[1];
+        first[0] = whole[0];
+        String a #= c.take(0, first, false);
+        Assert.equals(0, a.byteLength());
+        int8[] rest = heap int8[2];
+        rest[0] = whole[1];
+        rest[1] = (int8) 33;          // '!'
+        String b #= c.takeOwned(0, #rest);
+        Assert.equals("é!", b);
+    }
+
+    /** DOES NOT take the fast path for a token that ends mid-character:
+     *  the partial character is held, as `take` holds it. */
+    @Test
+    public void takeOwnedHoldsATokenEndingMidCharacter() {
+        Utf8Chunker c = heap Utf8Chunker(1);
+        int8[] whole #= Utf8ChunkerTest.bytesOf("xé");
+        int8[] cut = heap int8[2];
+        cut[0] = whole[0];
+        cut[1] = whole[1];
+        String a #= c.takeOwned(0, #cut);
+        Assert.equals("x", a);
+        Assert.isTrue(c.hasTail(0));
+    }
+}

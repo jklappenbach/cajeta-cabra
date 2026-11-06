@@ -102,6 +102,7 @@ public final class Serve implements TokenSink {
         this.diagBridge = null;
         this.diagAlways = false;
         this.diagWanted = 0;
+        this.oneTok = null;
         this.engine.setSink(this);
     }
 
@@ -530,8 +531,7 @@ public final class Serve implements TokenSink {
     void emitDoneFor(int32 slot, Request q) {
         this.ensureChunker();
         if (this.chunker.hasTail(slot)) {
-            String tailS #= this.chunker.take(slot,
-                Utf8Chunker.emptyBytes(), true);
+            String tailS #= this.chunker.flushTail(slot);
             if (tailS.byteLength() > 0) {
                 Protocol.emitChunk(this.out, this.trId[slot], tailS);
             }
@@ -622,14 +622,16 @@ public final class Serve implements TokenSink {
         if (this.trFirstNs[slot] == 0L) {
             this.trFirstNs[slot] = Clock.nanoTime();
         }
-        int32[] one #= heap int32[1];
-        one[0] = token;
-        int8[] b #= this.engine.tokenizer().decode(one, 1);
+        if (this.oneTok == null) {
+            this.oneTok = heap int32[1];
+        }
+        this.oneTok[0] = token;
+        int8[] b #= this.engine.tokenizer().decode(this.oneTok, 1);
         // Same hold-back as the ws host (Utf8Chunker): the TRANSCRIPT
         // must not depend on which transport carried it, and a token
         // boundary is allowed to split a multi-byte sequence.
         this.ensureChunker();
-        String s #= this.chunker.take(slot, b, false);
+        String s #= this.chunker.takeOwned(slot, #b);
         if (s.byteLength() > 0) {
             Protocol.emitChunk(this.out, this.trId[slot], s);
         }
@@ -637,6 +639,7 @@ public final class Serve implements TokenSink {
     }
 
     Utf8Chunker chunker;
+    int32[] oneTok;            // the token id decode reads, reused per token
 
     void ensureChunker() {
         if (this.chunker == null) {
