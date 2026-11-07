@@ -389,9 +389,12 @@ one exception in 10.5.
   HTTP GETs on the listening port serve the built client from `<dir>`
   (`/` → `index.html`, assets by path, correct content types, 404
   otherwise), and `GET /ws` with an Upgrade header is the §5.4.1
-  WebSocket. Without `--web` the host behaves exactly as today: ws only.
-  One port, one process, nothing else to start — this is §2.5's
-  "a link installs cabra, and cabra serves".
+  WebSocket. Without `--web` there is no static mount: a plain GET other
+  than `GET /health` (§11.3) is 404, and the connection stays open as
+  HTTP/1.1 keep-alive does (Julian, 2026-11-07, on the move to
+  primavera's `WebServer`; it closed before). One port, one process,
+  nothing else to start — this is §2.5's "a link installs cabra, and
+  cabra serves".
 - **10.2 Client-held state.** The client keeps every conversation in the
   browser (localStorage): messages, sampling parameters, and the session
   id it last held. A page reload loses nothing; the host holds only a
