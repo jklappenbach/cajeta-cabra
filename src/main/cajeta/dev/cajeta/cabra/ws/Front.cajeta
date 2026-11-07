@@ -1,0 +1,180 @@
+package dev.cajeta.cabra.ws;
+
+import cajeta.concurrent.Channel;
+import cajeta.concurrent.Lock;
+import cajeta.concurrent.LockGuard;
+import cajeta.lang.String;
+import dev.cajeta.primavera.web.CloseException;
+import dev.cajeta.primavera.web.Connection;
+import dev.cajeta.primavera.web.JsonBody;
+import dev.cajeta.primavera.web.RequestView;
+import dev.cajeta.primavera.web.Response;
+import dev.cajeta.cabra.proto.Protocol;
+import dev.cajeta.cabra.proto.Req;
+
+/**
+ * The connection side of host mode: primavera's hooks for the `/ws` path and
+ * the `/health` route, run on each connection's own fiber (plan 12.2.2).
+ *
+ * A connection is admitted up to the connection bound and refused past it
+ * with 1013. Its messages are parsed in place from the connection's buffer.
+ * Until it authenticates, only an `auth` with the host's token is answered,
+ * and anything else closes it with 1008 before any op runs (7.1.4). After
+ * that each request goes to the host loop as an owned `Inbound`, and so does
+ * the close, so the host can end that connection's turns.
+ */
+public final class Front {
+
+    /** The front of the host that is serving, which the hooks use. One
+     *  host serves at a time; `listen` sets it. A borrow: the host owns
+     *  its front. */
+    public static Front serving;
+
+    String token;               // owned; "" = auth disabled
+    String state;               // what /health reports
+    public Channel<Inbound> inCh;   // to the host loop
+
+    // The open connections: ids (0 = a free slot) and whether each has
+    // authenticated. A slot's flag is only touched by its own connection's
+    // fiber; the lock covers claiming, finding and freeing slots.
+    Lock mu;
+    int64[] ids;
+    boolean[] authed;
+    // Connections between their open hook and the end of their close hook.
+    // Primavera can run a close hook after its server's shutdown returns,
+    // so the host waits for this to reach 0 before it drops the front.
+    int32 live;
+
+    public Front(String token, int32 maxConns) {
+        this.token #= token.clone();
+        this.state = "ready";
+        this.inCh = heap Channel<Inbound>(64);
+        this.mu = heap Lock();
+        this.ids = heap int64[maxConns];
+        this.authed = heap boolean[maxConns];
+        this.live = 0;
+        return;
+    }
+
+    int32 slotOf(int64 id) {
+        LockGuard g #= this.mu.acquire();
+        int32 i = 0;
+        while (i < this.ids.count()) {
+            if (this.ids[i] == id) {
+                return i;
+            }
+            i = i + 1;
+        }
+        return 0 - 1;
+    }
+
+    /** Connections whose close hook has not finished. */
+    public int32 liveCount() {
+        LockGuard g #= this.mu.acquire();
+        return this.live;
+    }
+
+    /** Whether connection `id` is still open. */
+    public boolean isOpen(int64 id) {
+        return this.slotOf(id) >= 0;
+    }
+
+    /** The open hook: claims a slot, or refuses the connection with 1013. */
+    public static void opened(Connection c) {
+        Front f = Front.serving;
+        boolean took = false;
+        {
+            LockGuard g #= f.mu.acquire();
+            f.live = f.live + 1;
+            int32 i = 0;
+            while (i < f.ids.count() && !took) {
+                if (f.ids[i] == 0L) {
+                    f.ids[i] = c.id();
+                    f.authed[i] = false;
+                    took = true;
+                }
+                i = i + 1;
+            }
+        }
+        if (!took) {
+            throw heap CloseException(1013);
+        }
+        return;
+    }
+
+    /** The message hook: parse in place, gate on auth, hand the request over. */
+    public static void message(Connection c, JsonBody b) {
+        Front f = Front.serving;
+        Req r #= Front.parse(b);
+        int32 slot = f.slotOf(c.id());
+        if (slot < 0) {
+            return;
+        }
+        if (!f.authed[slot] && f.token.byteLength() > 0) {
+            if (r.ok && r.op.equals("auth") && r.token.equals(f.token)) {
+                f.authed[slot] = true;
+                c.send("{\"authed\":true}");
+                return;
+            }
+            throw heap CloseException(1008);
+        }
+        Inbound e = heap Inbound(Inbound.MESSAGE, c.id(), #r);
+        f.inCh.send(#e);
+        return;
+    }
+
+    // The message's own bytes when it starts the buffer, which is how
+    // primavera binds a WebSocket message; a copy of the slice otherwise.
+    static #Req parse(JsonBody b) {
+        if (b.offset() == 0) {
+            return Protocol.parseBytes(b.bytes(), b.length());
+        }
+        int32 n = b.length();
+        int8[] copy = heap int8[n];
+        int8[] src = b.bytes();
+        int32 i = 0;
+        while (i < n) {
+            copy[i] = src[b.offset() + i];
+            i = i + 1;
+        }
+        return Protocol.parseBytes(copy, n);
+    }
+
+    /** The close hook: frees the slot and tells the host. Never parks: the
+     *  host loop may already have stopped. */
+    public static void closed(Connection c, int32 code) {
+        Front f = Front.serving;
+        int64 id = c.id();
+        {
+            LockGuard g #= f.mu.acquire();
+            int32 i = 0;
+            while (i < f.ids.count()) {
+                if (f.ids[i] == id) {
+                    f.ids[i] = 0L;
+                    f.authed[i] = false;
+                }
+                i = i + 1;
+            }
+        }
+        if (!f.inCh.isClosed()) {
+            Inbound e = heap Inbound(Inbound.CLOSED, id, null);
+            try {
+                f.inCh.trySend(#e);
+            } catch (Exception x) {
+            }
+        }
+        // Last: after this the hook never touches the front again.
+        {
+            LockGuard g #= f.mu.acquire();
+            f.live = f.live - 1;
+        }
+        return;
+    }
+
+    /** `GET /health`: the host's state as a JSON object. */
+    public static void health(RequestView q, Response r) {
+        Front f = Front.serving;
+        r.json(200).field("state", f.state).end();
+        return;
+    }
+}

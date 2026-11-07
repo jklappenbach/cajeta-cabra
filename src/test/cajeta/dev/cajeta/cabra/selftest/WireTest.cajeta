@@ -4,6 +4,7 @@ import cajeta.lang.String;
 import dev.cajeta.unit.Assert;
 import dev.cajeta.unit.Test;
 import dev.cajeta.cabra.proto.Wire;
+import dev.cajeta.cabra.ws.ChunkLine;
 
 /**
  * The exact bytes `Wire` emits. The streamed lines are built once per
@@ -67,5 +68,28 @@ public class WireTest {
     public void largeIdsKeepEveryDigit() {
         String m #= Wire.chunk(9223372036854775807L, "z");
         Assert.equals("{\"id\":9223372036854775807,\"chunk\":\"z\"}", m);
+    }
+
+    /** The host's chunk encoder writes `Wire.chunk`'s bytes, at the
+     *  offset it is given and nowhere else, sized exactly. */
+    @Test
+    public void aChunkLineEncodesTheChunkBytesInPlace() {
+        ChunkLine c = heap ChunkLine();
+        String text = "a\"b café";
+        c.set(42L, text);
+        String want #= Wire.chunk(42L, text);
+        Assert.equals((int64) want.byteLength(), (int64) c.encodedSize());
+        int32 n = c.encodedSize();
+        int8[] dst = heap int8[n + 4];
+        dst[0] = (int8) 7;
+        dst[1] = (int8) 7;
+        dst[n + 2] = (int8) 9;
+        dst[n + 3] = (int8) 9;
+        c.encodeInto(dst, 2);
+        String got = heap String(#dst, n + 4);
+        String mid #= got.substring(2, n + 2);
+        Assert.equals(want, mid);
+        Assert.equals(7L, (int64) got.byteAt(1));
+        Assert.equals(9L, (int64) got.byteAt(n + 2));
     }
 }

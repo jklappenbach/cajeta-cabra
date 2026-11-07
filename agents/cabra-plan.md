@@ -631,7 +631,7 @@ Julian's decisions: typed Endpoints, not `@Rest`; an explicit `Turn`, not
 fiber-crossing request scope; a byte-bounded send queue.*
 
 ### 12.1 TDD
-- [ ] 12.1.1 Units 6–8's suites pass unchanged against the primavera
+- [x] 12.1.1 Units 6–8's suites pass unchanged against the primavera
       assembly (SessionCoreTest, HostTest, ClientTest — the byte-level
       bars), except that a session id is primavera's issued string
       (spec §11.5, Julian 2026-11-06): expected bytes carry it as a JSON
@@ -645,11 +645,11 @@ fiber-crossing request scope; a byte-bounded send queue.*
       session, emit only their own chunks, byte-equal to their solos; a
       session-scoped component resolved for a turn is that session's
       instance.
-- [ ] 12.1.4 The declared surface: `GET /health` is a typed `Endpoints`
+- [x] 12.1.4 The declared surface: `GET /health` is a typed `Endpoints`
       route returning the health object; `web/dist` is a static mount
       (`/` → `index.html`, a missing asset 404); `/ws` is a
       `WebSocketEndpoints` path.
-- [ ] 12.1.5 A client that stops reading: the other session's turn
+- [x] 12.1.5 A client that stops reading: the other session's turn
       finishes byte-equal to its solo (7.1.6's bar); past the byte bound
       the slow connection closes with 1008, its session stays OPEN, and a
       reconnect resumes it by id (spec §11.6.1).
@@ -680,6 +680,19 @@ fiber-crossing request scope; a byte-bounded send queue.*
       in the relay and in the web client. The ws half needs the whole
       message text from a WebSocket path, which `JsonBody` does not
       expose in primavera 0.5.1.)*
+      *(2026-11-07: the ws half is in, on primavera 0.6.0. `ws/Host`
+      builds a `WebServer` with `GET /health`, the web root as
+      `staticDir("/")` and `/ws` with open, message and close hooks in
+      `ws/Front`; `WsConn` and the accept loop are gone. Messages parse in
+      place from `JsonBody.bytes()`, and chunk lines encode straight into
+      the send ring through one reused `ChunkLine` (`sendEncoded`). A close
+      cancels that connection's turns. The `Turn` objects and the
+      components remain. Two workarounds stand in for cajeta bugs to file:
+      a capturing handler's closure was freed while the server held it, so
+      the hooks capture nothing and reach the front through
+      `Front.serving`; and an await of the serve task outside the scope
+      that spawned it rethrew a freed exception, so the serve fiber raises
+      a flag instead.)*
 - [ ] 12.2.3 `docs/architecture.md`: cabra as a primavera application.
 
 ### 12.3 Acceptance

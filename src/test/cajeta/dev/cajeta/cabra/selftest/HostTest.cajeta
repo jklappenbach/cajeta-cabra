@@ -17,11 +17,9 @@ import dev.cajeta.unit.Test;
 import dev.cajeta.http.ws.WebSocket;
 import dev.cajeta.http.ws.WsMessage;
 import dev.cajeta.http.ws.WsUpgrade;
-import cajeta.io.net.TcpListener;
 import dev.cajeta.llm.LlmEngine;
 import dev.cajeta.cabra.proto.ErrKind;
 import dev.cajeta.cabra.ws.Host;
-import dev.cajeta.cabra.ws.WsConn;
 
 /**
  * Plan 7.1 — host mode over WebSocket, in-process on loopback: the
@@ -83,7 +81,7 @@ public class HostTest {
 
     static #WebSocket dial(int32 port, AsyncReader rd, AsyncWriter wr) {
         Uri u #= Uri.builder().scheme("ws").host("127.0.0.1")
-            .port(port).path("/").build();
+            .port(port).path("/ws").build();
         return #WsUpgrade.connectClient(rd, wr, u, 424242);
     }
 
@@ -466,21 +464,6 @@ public class HostTest {
         return 0;
     }
 
-    /** Holds a raw TCP connection open (no upgrade, no reads) until
-     *  the test flags it done — the far end of the outbox-bound test. */
-    static async int32 runHolder(ClientRun cr) {
-        IpAddress a #= IpAddress.loopbackV4();
-        SocketAddress addr #= SocketAddress.of(#a, cr.port);
-        TcpStream sock #= TcpStream.connectAsync(#addr);
-        int32 tries = 0;
-        while (!cr.closedEarly && tries < 2000) {
-            Fiber.sleep(Duration.ofMillis(5L));
-            tries = tries + 1;
-        }
-        sock.close();
-        return 0;
-    }
-
     /** 7.1.3 — a client that dies without closing has its session
      *  reclaimed by expiry: one session slot, 250ms idle bound, and a
      *  later open succeeds with a NEW sid. */
@@ -559,33 +542,130 @@ public class HostTest {
         Assert.isTrue(cf.finish.byteLength() > 0);
     }
 
-    /** §5.3.2 / 7.2.4 — the outbound ring REFUSES past its bound
-     *  instead of blocking: no writer fiber runs, nothing drains, and
-     *  enqueue number OUT_CAP+1 must come back false. */
-    @Test
-    public void theOutboxBoundRefusesInsteadOfBlocking() {
-        IpAddress la #= IpAddress.loopbackV4();
-        SocketAddress addr #= SocketAddress.of(#la, 0);
-        TcpListener l #= TcpListener.bind(addr);
-        ClientRun ch = heap ClientRun();
-        ch.port = l.boundPort();
-        scope {
-            spawn runHolder(ch);
-            TcpStream s #= l.acceptAsync();
-            WsConn c = heap WsConn(0, #s);
-            int32 i = 0;
-            boolean allIn = true;
-            while (i < 256) {
-                if (!c.enqueueOut("m" + i)) {
-                    allIn = false;
-                }
-                i = i + 1;
-            }
-            Assert.isTrue(allIn);
-            Assert.isFalse(c.enqueueOut("overflow"));
-            c.dead = true;
-            ch.closedEarly = true;
+    /** Evidence for 12.1.5: the turn that overran the bound, and the
+     *  same session resolved by id on a second connection. */
+    static class BoundRun {
+        public int32 port;
+        public String session;
+        public boolean firstCut;    // the first connection ended before done
+        public String finish2;
+        public int32 code1;         // the server's close code for the first
+        public BoundRun() {
+            this.port = 0;
+            this.session = null;
+            this.firstCut = false;
+            this.finish2 = "";
+            this.code1 = 0;
         }
-        l.close();
+    }
+
+    static #WebSocket dialAuthed(int32 port, AsyncReader rd, AsyncWriter wr) {
+        WebSocket ws #= HostTest.dial(port, rd, wr);
+        ws.send("{\"op\":\"auth\",\"token\":\"" + HostTest.TOKEN + "\"}");
+        String au #= HostTest.recvText(ws);
+        return #ws;
+    }
+
+    /** 12.1.5: the done line is larger than the connection's byte bound,
+     *  so the first turn's connection is closed before it arrives. The
+     *  session outlives the connection: a second one resumes it by id. */
+    static async int32 runOverBound(BoundRun br, Host h) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, br.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dialAuthed(br.port, rd, wr);
+        ws.send("{\"op\":\"open\",\"id\":51}");
+        String op #= HostTest.recvText(ws);
+        JsonValue ov #= Json.parse(op);
+        br.session #= "" + ov.object().get("session").asString();
+        ws.send("{\"op\":\"generate\",\"id\":52,\"session\":\"" + br.session
+            + "\",\"prompt\":\"" + ConcurrencyTest.PROMPT_A
+            + "\",\"n\":3,\"temp\":0}");
+        br.firstCut = true;
+        while (true) {
+            String line = null;
+            try {
+                line #= HostTest.recvText(ws);
+            } catch (Exception e) {
+                line = null;
+            }
+            if (line == null) {
+                break;
+            }
+            if (line.contains("\"done\"")) {
+                br.firstCut = false;
+                break;
+            }
+        }
+        sock.close();
+        int32 tries = 0;
+        while (h.lastCloseCode() == 0 && tries < 400) {
+            Fiber.sleep(Duration.ofMillis(5L));
+            tries = tries + 1;
+        }
+        br.code1 = h.lastCloseCode();
+
+        TcpStream s2 #= TcpStream.connectAsync(SocketAddress.parse("127.0.0.1:" + br.port));
+        AsyncReader rd2 = heap AsyncReader(s2);
+        AsyncWriter wr2 = heap AsyncWriter(s2);
+        WebSocket w2 #= HostTest.dialAuthed(br.port, rd2, wr2);
+        // Resolving the session by id from the new connection: `close`
+        // answers `closed` (67 bytes, under the bound) only for an open
+        // session; `session_gone` is longer than the bound, so a gone
+        // session would read as a cut.
+        w2.send("{\"op\":\"close\",\"id\":53,\"session\":\"" + br.session + "\"}");
+        String reply = null;
+        try {
+            reply #= HostTest.recvText(w2);
+        } catch (Exception e) {
+            reply = null;
+        }
+        if (reply == null) {
+            br.finish2 = "cut";
+        } else if (reply.contains("\"closed\"")) {
+            br.finish2 = "closed";
+        } else {
+            br.finish2 #= reply;
+        }
+        s2.close();
+
+        // The second connection was cut by its done line too: a third
+        // takes the host down.
+        TcpStream s3 #= TcpStream.connectAsync(SocketAddress.parse("127.0.0.1:" + br.port));
+        AsyncReader rd3 = heap AsyncReader(s3);
+        AsyncWriter wr3 = heap AsyncWriter(s3);
+        WebSocket w3 #= HostTest.dialAuthed(br.port, rd3, wr3);
+        w3.send("{\"op\":\"shutdown\"}");
+        Fiber.sleep(Duration.ofMillis(200L));
+        s3.close();
+        return 0;
+    }
+
+    /** 12.1.5 — past the byte bound the connection closes with 1008 and
+     *  its session stays OPEN: a reconnect resumes it by id. The bound
+     *  (100 bytes) admits the auth, open and chunk lines and refuses the
+     *  done line with its usage block, so the cut is deterministic. The
+     *  second connection closes the session by id, which only an open
+     *  session answers. */
+    @Test
+    public void pastTheByteBoundTheConnectionClosesAndItsSessionResumes() {
+        LlmEngine e #= ConcurrencyTest.engine(1);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 1, 60000L);
+        h.setQueueBytes(100);
+        h.listen(0);
+        BoundRun br = heap BoundRun();
+        br.port = h.port;
+        scope {
+            spawn runOverBound(br, h);
+            h.run();
+            h.shutdown();
+        }
+        Assert.isTrue(br.session != null);
+        Assert.isTrue(br.firstCut);
+        Assert.equals(1008L, (int64) br.code1);
+        Assert.equals("closed", br.finish2);
+        Assert.equals(0L, (int64) h.openSessions());
     }
 }

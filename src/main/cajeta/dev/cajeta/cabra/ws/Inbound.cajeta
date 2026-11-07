@@ -3,19 +3,24 @@ package dev.cajeta.cabra.ws;
 import dev.cajeta.cabra.proto.Req;
 
 /**
- * One parsed request and the connection it came in on: what a reader fiber
- * hands the host loop, and what the wait queue holds (plan 7.2.4). The
- * reader parses the message in place from the WebSocket's lent buffer, so
- * the request crosses fibers as this owned record and the message itself
- * is never copied.
+ * One event from a connection for the host loop: a parsed request, or the
+ * connection's close. It is what a connection's message handler hands the
+ * host, and what the wait queue holds (plan 7.2.4). The handler parses the
+ * message in place from the connection's buffer, so the request crosses
+ * fibers as this owned record and the message itself is never copied.
  */
 public final class Inbound {
 
-    public int32 connSlot;
-    public Req req;             // owned
+    public static final int32 MESSAGE = 0;
+    public static final int32 CLOSED = 1;
 
-    public Inbound(int32 connSlot, #Req req) {
-        this.connSlot = connSlot;
+    public int32 kind;
+    public int64 conn;          // the connection's id in the server's registry
+    public Req req;             // owned; null for CLOSED
+
+    public Inbound(int32 kind, int64 conn, #Req req) {
+        this.kind = kind;
+        this.conn = conn;
         this.req #= req;
         return;
     }

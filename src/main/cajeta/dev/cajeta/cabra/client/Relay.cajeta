@@ -85,7 +85,7 @@ public final class Relay {
             this.rd = heap AsyncReader(this.sock);
             this.wr = heap AsyncWriter(this.sock);
             Uri u #= Uri.builder().scheme("ws").host("127.0.0.1")
-                .port(this.port).path("/").build();
+                .port(this.port).path("/ws").build();
             this.ws #= WsUpgrade.connectClient(this.rd, this.wr, u,
                 424242);
         } catch (Exception e) {

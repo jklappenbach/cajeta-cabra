@@ -26,14 +26,13 @@ import dev.cajeta.llm.LlmEngine;
 import dev.cajeta.cabra.ws.Host;
 
 /**
- * Plan 11.1.1 + 11.1.2 (spec §10.1) — the host's HTTP front. With
- * `--web <dir>` a plain GET serves the built client from the directory
- * (index for `/`, assets by path with their content type, 404 for a
- * missing path, on ONE keep-alive connection the way a browser fetches
- * a page); `/ws` with an Upgrade header is the same WebSocket as
- * before, and a turn over it is what unit 7's clients get. Without
- * `--web` a plain GET is answered 404 and the connection closed, so
- * nothing but the socket protocol is reachable — as today.
+ * Plan 11.1.1 + 11.1.2 (spec §10.1) and 12.1.4 — the host's HTTP front,
+ * primavera's declared surface. With `--web <dir>` the directory is a
+ * static mount on `/` (index for `/`, assets by path with their content
+ * type, 404 for a missing path, on ONE keep-alive connection the way a
+ * browser fetches a page); `/ws` is a WebSocket path, and a turn over it
+ * is what unit 7's clients get. `GET /health` is a typed route returning
+ * the health object. Without `--web` every other plain GET is 404.
  */
 public class WebFrontTest {
 
@@ -170,8 +169,8 @@ public class WebFrontTest {
         return 0;
     }
 
-    /** Without a web root: a plain GET is 404 and the connection is
-     *  closed — the next read sees EOF. */
+    /** Without a web root: a plain GET is 404, and `/health` answers
+     *  with the health object on the same connection. */
     static async int32 runRefused(WebRun w) {
         IpAddress a #= IpAddress.loopbackV4();
         SocketAddress addr #= SocketAddress.of(#a, w.port);
@@ -181,14 +180,11 @@ public class WebFrontTest {
         WebFrontTest.sendGet(wr, "/");
         Got r0 #= WebFrontTest.readResponse(rd);
         w.status0 = r0.status;
-        int8[] one = heap int8[1];
-        int32 n = 1;
-        try {
-            n = rd.read(one, 0, 1);
-        } catch (Exception e) {
-            n = 0;
-        }
-        w.status1 = n == 0 ? 0 : 1;   // 0 = closed, as required
+        WebFrontTest.sendGet(wr, "/health");
+        Got r1 #= WebFrontTest.readResponse(rd);
+        w.status1 = r1.status;
+        w.ctype1 #= r1.ctype;
+        w.body0 #= r1.body;
         sock.close();
         w.done = true;
         return 0;
@@ -272,10 +268,10 @@ public class WebFrontTest {
         Assert.isTrue(s.chunks > 0);
     }
 
-    /** The does-NOT-serve half: no `--web`, a plain GET is 404 and
-     *  closed; the socket protocol is untouched. */
+    /** The does-NOT-serve half: no `--web`, a plain GET is 404 and only
+     *  `/health` and the socket are served (12.1.4). */
     @Test
-    public void withoutAWebRootAPlainGetIsRefused() {
+    public void withoutAWebRootOnlyHealthAndTheSocketAreServed() {
         LlmEngine e #= ConcurrencyTest.engine(1);
         Host h = heap Host(#e, HostTest.TOKEN, 4, 2, 60000L);
         h.listen(0);
@@ -295,7 +291,9 @@ public class WebFrontTest {
 
         Assert.isTrue(w.done);
         Assert.equals(404L, (int64) w.status0);
-        Assert.equals(0L, (int64) w.status1);
+        Assert.equals(200L, (int64) w.status1);
+        Assert.isTrue(w.ctype1.startsWith("application/json"));
+        Assert.equals("{\"state\":\"ready\"}", w.body0);
         Assert.equals("budget", s.finish);
     }
 }

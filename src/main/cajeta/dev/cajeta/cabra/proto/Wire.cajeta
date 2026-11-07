@@ -99,15 +99,27 @@ public final class Wire {
     // own bytes never copies it again.
 
     public static #String chunk(int64 id, String text) {
-        int32 n = 6 + Wire.digits(id) + 10 + Wire.escLen(text) + 2;
+        int32 n = Wire.chunkSize(id, text);
         int8[] b = heap int8[n];
-        int32 at = Wire.lit(b, 0, "{\"id\":");
-        at = Wire.num(b, at, id);
-        at = Wire.lit(b, at, ",\"chunk\":\"");
-        at = Wire.putEsc(b, at, text);
-        at = Wire.lit(b, at, "\"}");
+        Wire.chunkInto(b, 0, id, text);
         String out = heap String(#b, n);
         return #= out;
+    }
+
+    /** The byte length of the chunk line for `id` and `text`. */
+    public static int32 chunkSize(int64 id, String text) {
+        return 6 + Wire.digits(id) + 10 + Wire.escLen(text) + 2;
+    }
+
+    /** Writes the chunk line into `dst` at `at`, exactly `chunkSize` bytes,
+     *  so a transport can encode it straight into its send queue. */
+    public static void chunkInto(int8[] dst, int32 at, int64 id, String text) {
+        int32 p = Wire.lit(dst, at, "{\"id\":");
+        p = Wire.num(dst, p, id);
+        p = Wire.lit(dst, p, ",\"chunk\":\"");
+        p = Wire.putEsc(dst, p, text);
+        p = Wire.lit(dst, p, "\"}");
+        return;
     }
 
     /** §10.9: one forwarded record; `body` is the diag object, already

@@ -1,0 +1,39 @@
+package dev.cajeta.cabra.ws;
+
+import cajeta.lang.String;
+import dev.cajeta.primavera.web.Encoded;
+import dev.cajeta.cabra.proto.Wire;
+
+/**
+ * One chunk line, encoded straight into a connection's send queue. The host
+ * keeps one and sets it before each send, so a streamed token makes no line
+ * string at all: its text is escaped once, into the queue the writer sends
+ * from. The bytes are `Wire.chunk`'s.
+ */
+public final class ChunkLine implements Encoded {
+
+    public int64 id;
+    public String text;         // borrow, valid for one send
+
+    public ChunkLine() {
+        this.id = 0L;
+        this.text = "";
+        return;
+    }
+
+    /** Points the line at `id` and `text` for the next send. */
+    public void set(int64 id, ^String text) {
+        this.id = id;
+        this.text = text;
+        return;
+    }
+
+    public int32 encodedSize() {
+        return Wire.chunkSize(this.id, this.text);
+    }
+
+    public void encodeInto(int8[] dst, int32 at) {
+        Wire.chunkInto(dst, at, this.id, this.text);
+        return;
+    }
+}

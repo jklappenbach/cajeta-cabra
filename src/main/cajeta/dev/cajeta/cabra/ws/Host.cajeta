@@ -1,20 +1,27 @@
 package dev.cajeta.cabra.ws;
 
 import cajeta.collection.ArrayList;
+import cajeta.concurrent.AtomicInt32;
 import cajeta.concurrent.Channel;
-import cajeta.io.net.IpAddress;
-import cajeta.io.net.SocketAddress;
-import cajeta.io.net.TcpListener;
-import cajeta.io.net.TcpStream;
+import cajeta.concurrent.Fiber;
 import cajeta.lang.Optional;
 import cajeta.lang.String;
 import cajeta.time.Clock;
+import cajeta.time.Duration;
 import dev.cajeta.llm.Diag;
 import dev.cajeta.llm.LlmEngine;
 import dev.cajeta.llm.chat.ChatTemplate;
 import dev.cajeta.llm.gen.SampleParams;
 import dev.cajeta.llm.gen.TokenSink;
 import dev.cajeta.llm.sched.Request;
+import dev.cajeta.primavera.web.Connection;
+import dev.cajeta.primavera.web.Endpoints;
+import dev.cajeta.primavera.web.JsonBody;
+import dev.cajeta.primavera.web.RequestView;
+import dev.cajeta.primavera.web.Response;
+import dev.cajeta.primavera.web.WebServer;
+import dev.cajeta.primavera.web.WebServerBuilder;
+import dev.cajeta.primavera.web.WebSocketEndpoints;
 import dev.cajeta.cabra.core.Sessions;
 import dev.cajeta.cabra.diag.DiagQueue;
 import dev.cajeta.cabra.diag.DiagnosticBridge;
@@ -29,20 +36,22 @@ import dev.cajeta.cabra.ChatOp;
 /**
  * Host mode (spec §5.1.2, plan unit 7): one loaded model, N WebSocket
  * clients, every conversation multiplexed onto the engine's continuous
- * batching. The thread/fiber layout:
+ * batching. It is a primavera application (plan 12.2.2): a `WebServer`
+ * serves `GET /health`, the web client as a static mount when there is a
+ * web root, and the socket protocol on `/ws`. The fiber layout:
  *
- *   accept fiber      — accepts sockets, binds a `WsConn`, spawns its
- *                       reader (which upgrades and, on success, spawns
- *                       that connection's writer).
- *   per-conn reader   — inbound frames -> the shared signal channel.
- *   per-conn writer   — drains that connection's bounded outbox, so a
- *                       peer that stops reading stalls only itself
- *                       (§5.3.2); past the bound the connection sheds.
- *   host loop         — THIS thread: every engine call. Drains
- *                       signals, resolves sessions (unit 6 registry),
- *                       submits turns, steps the scheduler, and routes
- *                       each chunk by rid -> conn (the Serve demux with
- *                       a connection column).
+ *   server fibers     — primavera's: accept, upgrade, and per connection
+ *                       a receive loop running `Front`'s hooks (parse in
+ *                       place, auth gate, hand the request over).
+ *   per-conn writer   — primavera's: drains that connection's send ring,
+ *                       so a peer that stops reading stalls only itself
+ *                       (§5.3.2); past the byte bound it closes with 1008.
+ *   host loop         — THIS thread: every engine call. Drains requests,
+ *                       resolves sessions, submits turns, steps the
+ *                       scheduler, and routes each chunk by rid -> conn
+ *                       (the Serve demux with a connection column). A
+ *                       chunk is encoded straight into the connection's
+ *                       send ring.
  *
  * Sessions are identity + expiry only (§5.2.8): host-side KV is a
  * cache via the engine's prefix store, never pinned per session, so a
@@ -52,23 +61,23 @@ public final class Host implements TokenSink {
 
     LlmEngine engine;          // owned
     Sessions reg;              // owned
-    String token;              // "" = auth disabled
     String state;
 
-    int32 maxConns;
-    WsConn[] conns;            // slot-indexed; null = free
-    Channel<Inbound> inCh;     // parsed requests, owned, from the readers
-    TcpListener listener;      // owned
+    Front front;               // owned; the connection hooks
+    WebServer web;             // owned; null until listen
+    Task<int32> serveTask;
+    AtomicInt32 served;        // 1 once the serve fiber has returned
+    int32 queueBytes;          // each connection's send bound
+    ChunkLine line;            // reused for every chunk sent
     public int32 port;
     boolean stopping;
-    Task<int32> acceptTask;
 
     // In-flight table: the Serve demux plus the connection column.
     int32 cap;
     int32 live;
     int32[] trRid;
     int64[] trId;
-    int32[] trConn;
+    int64[] trConn;            // the connection's registry id
     int32[] trPromptLen;
     int64[] trT0Ns;            // submit time; usage's prefill_ms base
     int64[] trFirstNs;         // first token; 0 until one arrives
@@ -101,19 +110,19 @@ public final class Host implements TokenSink {
             int32 maxSessions, int64 idleExpiryMs) {
         this.engine #= engine;
         this.reg = heap Sessions(maxSessions, idleExpiryMs);
-        this.token #= token;
         this.state = "ready";
-        this.maxConns = maxConns;
-        this.conns #= heap WsConn[maxConns];
-        this.inCh = heap Channel<Inbound>(64);
-        this.listener = null;
+        this.front = heap Front(token, maxConns);
+        this.web = null;
+        this.served = heap AtomicInt32(0);
+        this.queueBytes = 1048576;
+        this.line = heap ChunkLine();
         this.port = 0;
         this.stopping = false;
         this.cap = maxSessions;
         this.live = 0;
         this.trRid = heap int32[this.cap];
         this.trId = heap int64[this.cap];
-        this.trConn = heap int32[this.cap];
+        this.trConn = heap int64[this.cap];
         this.trPromptLen = heap int32[this.cap];
         this.trT0Ns = heap int64[this.cap];
         this.trFirstNs = heap int64[this.cap];
@@ -135,9 +144,9 @@ public final class Host implements TokenSink {
         return;
     }
 
-    /** §10.1: serve the built web client from `dir` on plain GETs
-     *  (index for `/`, assets by path, 404 otherwise). Unset, a plain
-     *  GET is 404 + close and only the socket protocol is reachable. */
+    /** §10.1: serve the built web client from `dir` as a static mount on
+     *  `/` (index for `/`, assets by path, 404 otherwise). Unset, a plain
+     *  GET other than `/health` is 404. Set before `listen`. */
     public void setWebRoot(String dir) {
         String d = "" + dir;
         this.webDir #= d;
@@ -213,11 +222,6 @@ public final class Host implements TokenSink {
         return;
     }
 
-    /** The web root directory, or null when there is no HTTP front. */
-    public String webDir() {
-        return this.webDir;
-    }
-
     /** Install the model's chat template. Left unset (null) the `chat`
      *  op refuses — cabra never guesses a template (plan 3.2.1). */
     public void setTemplate(#ChatTemplate t) {
@@ -233,87 +237,68 @@ public final class Host implements TokenSink {
         return;
     }
 
-    /** Bind the listener on loopback:`port` (0 = ephemeral) and spawn
-     *  the accept fiber. `port` reports what was bound. */
+    /** Set before `listen`: the bytes a connection may have queued before
+     *  it is closed with 1008 (each message counts its payload plus 4). */
+    public void setQueueBytes(int32 n) {
+        this.queueBytes = n;
+        return;
+    }
+
+    /** Bind the server on loopback:`port` (0 = ephemeral) and start it
+     *  serving. `port` reports what was bound. */
     public void listen(int32 port) {
-        IpAddress la #= IpAddress.loopbackV4();
-        SocketAddress addr #= SocketAddress.of(#la, port);
-        this.listener = TcpListener.bind(addr);
-        this.port = this.listener.boundPort();
-        Task<int32> t = spawn acceptLoop(this);
-        this.acceptTask #= t;
+        // The hooks reach the front through `Front.serving` and capture
+        // nothing. A capturing handler's closure was freed while the server
+        // still held it, even handed over with `#` (2026-11-07, primavera
+        // 0.6.0 on cajeta v0.52.0): the first message jumped through a freed
+        // function pointer. Primavera's own handlers capture nothing.
+        Front.serving #= this.front;
+        Endpoints api = heap Endpoints();
+        api.route("GET", "/health",
+            (RequestView q, Response r) -> Front.health(q, r));
+        if (this.webDir != null) {
+            api.staticDir("/", this.webDir);
+        }
+        WebSocketEndpoints ws = heap WebSocketEndpoints();
+        ws.queueBytes(this.queueBytes);
+        ws.json("/ws", (Connection c) -> Front.opened(c),
+            (Connection c, JsonBody b) -> Front.message(c, b),
+            (Connection c, int32 code) -> Front.closed(c, code));
+        WebServerBuilder b #= WebServer.builder();
+        b.bind("127.0.0.1:" + port);
+        b.endpoints(#api);
+        b.websockets(#ws);
+        this.web #= b.build();
+        this.port = this.web.port();
+        Task<int32> t = spawn serveWeb(this);
+        this.serveTask #= t;
         return;
     }
 
-    static async int32 acceptLoop(Host h) {
-        while (!h.stopping) {
-            TcpStream s = null;
-            try {
-                s #= h.listener.acceptAsync();
-            } catch (Exception e) {
-                break;
-            }
-            int32 slot = h.freeConnSlot();
-            if (slot < 0) {
-                // Beyond connection capacity: shed at the door.
-                s.close();
-                continue;
-            }
-            if (h.conns[slot] != null) {
-                // Reusing a dead conn's slot: JOIN its fibers first —
-                // replacing the object under a still-parked reader was
-                // a use-after-free (the garbage slot-id logs,
-                // 2026-08-31).
-                h.conns[slot].stopAll();
-            }
-            // Fresh allocation STRAIGHT into the slot: a fiber-local
-            // intermediary left the slot holding a borrow whose parked
-            // owner died across this fiber's own park/resume — carrier
-            // threads then closed live connections (strace-proven,
-            // 2026-08-31).
-            h.conns[slot] #= heap WsConn(slot, #s);
-            WsConn.startRead(h.conns[slot], h);
+    // The serve fiber outlives `listen`'s frame, so nothing it throws is
+    // left for an await to carry across: it ends by raising `served`.
+    static async int32 serveWeb(Host h) {
+        try {
+            h.web.serve();
+        } catch (Throwable t) {
+            System.stderr.println("cabra: web server ended on a throw");
         }
-        return 0;
+        h.served.store(1);
+        return 1;
     }
 
-    int32 freeConnSlot() {
-        int32 i = 0;
-        while (i < this.maxConns) {
-            if (this.conns[i] == null
-                    || (this.conns[i].dead && this.conns[i].readerDone)) {
-                return i;
-            }
-            i = i + 1;
-        }
-        return 0 - 1;
-    }
-
-    /** Reader fibers: hand over one parsed request. */
-    public void inbound(int32 connSlot, #Req r) {
-        Inbound e = heap Inbound(connSlot, #r);
-        this.inCh.send(#e);
+    /** Queue `m` for a connection; the ring copies it. A send past the
+     *  byte bound closes the connection (§5.3.2): a client that stopped
+     *  reading is shed rather than waited on, by primavera. */
+    void say(int64 conn, String m) {
+        this.web.connections().send(conn, m);
         return;
     }
 
-    /** Reader fibers: the connection ended. Sessions SURVIVE (§5.2.2);
-     *  only the connection slot is reclaimed, by the accept loop. */
-    public void connGone(int32 connSlot) {
-        return;
-    }
-
-    /** Queue `m` for a connection. A sink: `say(c, #m)` hands the message
-     *  over and nothing copies it; a literal is lent. */
-    void say(int32 connSlot, String m) {
-        WsConn c = this.conns[connSlot];
-        if (c == null || c.dead) {
-            return;
-        }
-        if (!c.enqueueOut(#m)) {
-            // §5.3.2: a full outbox means a client that stopped
-            // reading; shed it rather than wait on it.
-            c.dead = true;
-        }
+    /** One chunk line, encoded straight into the connection's ring. */
+    void sendChunk(int64 conn, int64 id, String text) {
+        this.line.set(id, text);
+        this.web.connections().sendEncoded(conn, this.line);
         return;
     }
 
@@ -324,7 +309,7 @@ public final class Host implements TokenSink {
                 this.driveStep();
                 boolean absorbing = true;
                 while (absorbing) {
-                    Optional<Inbound> got = this.inCh.tryReceive();
+                    Optional<Inbound> got = this.front.inCh.tryReceive();
                     if (got.isPresent()) {
                         Inbound e #= got.take();
                         this.dispatch(#e);
@@ -333,7 +318,7 @@ public final class Host implements TokenSink {
                     }
                 }
             } else {
-                Optional<Inbound> got = this.inCh.receive();
+                Optional<Inbound> got = this.front.inCh.receive();
                 if (got.isEmpty()) {
                     return;
                 }
@@ -345,36 +330,28 @@ public final class Host implements TokenSink {
     }
 
     void dispatch(#Inbound e) {
-        int32 connSlot = e.connSlot;
-        WsConn c = this.conns[connSlot];
-        if (c == null || c.dead) {
+        int64 conn = e.conn;
+        if (e.kind == Inbound.CLOSED) {
+            this.connClosed(conn);
+            return;
+        }
+        if (!this.front.isOpen(conn)) {
             return;
         }
         int64 nowMs = Clock.nanoTime() / 1000000L;
         this.reg.expire(nowMs);
+        // 7.2.3: the auth gate ran in `Front` on the connection's fiber,
+        // so an unauthed connection never reaches here.
         Req r #= e.req;
-
-        // 7.2.3: a token check gates EVERYTHING on an unauthed
-        // connection — close before any other op is processed (7.1.4).
-        if (!c.authed && this.token.byteLength() > 0) {
-            if (r.ok && r.op.equals("auth")
-                    && r.token.equals(this.token)) {
-                c.authed = true;
-                this.say(connSlot, "{\"authed\":true}");
-                return;
-            }
-            c.dead = true;
-            return;
-        }
 
         if (!r.ok) {
             String m #= Wire.error(r.id, r.hasId, ErrKind.BAD_REQUEST,
                 r.err, false);
-            this.say(connSlot, #m);
+            this.say(conn, #m);
             return;
         }
         if (r.op.equals("auth")) {
-            this.say(connSlot, "{\"authed\":true}");
+            this.say(conn, "{\"authed\":true}");
             return;
         }
         if (r.op.equals("shutdown")) {
@@ -383,7 +360,7 @@ public final class Host implements TokenSink {
         }
         if (r.op.equals("health")) {
             String m #= Wire.health(r.id, this.state, "");
-            this.say(connSlot, #m);
+            this.say(conn, #m);
             return;
         }
         if (r.op.equals("open")) {
@@ -391,11 +368,11 @@ public final class Host implements TokenSink {
             if (sid == null) {
                 String m #= Wire.error(r.id, r.hasId, ErrKind.CAPACITY,
                     "no session slot free", false);
-                this.say(connSlot, #m);
+                this.say(conn, #m);
                 return;
             }
             String m #= Wire.opened(r.id, sid);
-            this.say(connSlot, #m);
+            this.say(conn, #m);
             return;
         }
         if (r.op.equals("close")) {
@@ -403,11 +380,11 @@ public final class Host implements TokenSink {
                 String m #= Wire.error(r.id, r.hasId,
                     ErrKind.SESSION_GONE, "close: no such open session",
                     false);
-                this.say(connSlot, #m);
+                this.say(conn, #m);
                 return;
             }
             String m #= Wire.closedOk(r.id, r.session);
-            this.say(connSlot, #m);
+            this.say(conn, #m);
             return;
         }
         if (r.op.equals("cancel")) {
@@ -416,12 +393,12 @@ public final class Host implements TokenSink {
             // flight here (finished, foreign, never submitted) is a
             // refusal carrying the id; the done line (finish "cancel")
             // follows on the next reap.
-            int32 slot = r.hasId ? this.slotOfId(connSlot, r.id) : (0 - 1);
+            int32 slot = r.hasId ? this.slotOfId(conn, r.id) : (0 - 1);
             if (slot < 0 || !this.engine.cancel(this.trRid[slot])) {
                 String m #= Wire.error(r.id, r.hasId, ErrKind.BAD_REQUEST,
                     "cancel: no request " + r.id
                     + " in flight on this connection", false);
-                this.say(connSlot, #m);
+                this.say(conn, #m);
             }
             return;
         }
@@ -435,15 +412,29 @@ public final class Host implements TokenSink {
                     : "unknown session id - never issued by this host";
                 String m #= Wire.error(r.id, r.hasId,
                     ErrKind.SESSION_GONE, why, true);
-                this.say(connSlot, #m);
+                this.say(conn, #m);
                 return;
             }
         }
-        this.submitOne(connSlot, #r);
+        this.submitOne(conn, #r);
         return;
     }
 
-    void submitOne(int32 connSlot, #Req r) {
+    /** A connection closed: its turns' output has nowhere to go, so they
+     *  are cancelled, and their done lines are dropped at the reap. Its
+     *  sessions survive (§5.2.2). */
+    void connClosed(int64 conn) {
+        int32 i = 0;
+        while (i < this.cap) {
+            if (this.trOpen[i] && this.trConn[i] == conn) {
+                this.engine.cancel(this.trRid[i]);
+            }
+            i = i + 1;
+        }
+        return;
+    }
+
+    void submitOne(int64 conn, #Req r) {
         int32[] ids = null;
         if (r.op.equals("chat")) {
             String rendered #= ChatOp.render(this.tpl, r.messagesRaw);
@@ -452,7 +443,7 @@ public final class Host implements TokenSink {
                     ErrKind.BAD_REQUEST,
                     "this model ships no chat template - use "
                     + "\"generate\" with a raw prompt", false);
-                this.say(connSlot, #tm);
+                this.say(conn, #tm);
                 return;
             }
             // RAW encode: the render already carries BOS and the role
@@ -467,7 +458,7 @@ public final class Host implements TokenSink {
                 "prompt is " + n + " tokens and n is " + r.n
                 + ", which exceeds the " + this.ctxLimit
                 + "-token context", false);
-            this.say(connSlot, #cm);
+            this.say(conn, #cm);
             return;
         }
         int32 slot = this.freeReqSlot();
@@ -476,13 +467,13 @@ public final class Host implements TokenSink {
             // itself would be unbounded.
             int64 wid = r.id;
             boolean whas = r.hasId;
-            if (this.enqueueWaiting(connSlot, #r)) {
+            if (this.enqueueWaiting(conn, #r)) {
                 return;
             }
             String m #= Wire.error(wid, whas, ErrKind.CAPACITY,
                 "busy: " + this.live + " in flight and the queue is full",
                 false);
-            this.say(connSlot, #m);
+            this.say(conn, #m);
             return;
         }
         SampleParams p = heap SampleParams(r.temp, r.seed);
@@ -495,14 +486,14 @@ public final class Host implements TokenSink {
         } catch (Throwable t) {
             String m #= Wire.error(r.id, r.hasId, ErrKind.INTERNAL,
                 "submit failed", false);
-            this.say(connSlot, #m);
+            this.say(conn, #m);
             return;
         }
         this.ensureChunker();
         this.chunker.reset(slot);
         this.trRid[slot] = rid;
         this.trId[slot] = r.id;
-        this.trConn[slot] = connSlot;
+        this.trConn[slot] = conn;
         this.trPromptLen[slot] = n;
         this.trT0Ns[slot] = Clock.nanoTime();
         this.trFirstNs[slot] = 0L;
@@ -536,14 +527,14 @@ public final class Host implements TokenSink {
     /** Queue a request behind a full in-flight table. False when the
      *  queue is at its bound: the request is dropped and the caller sheds
      *  it with a busy error. */
-    boolean enqueueWaiting(int32 connSlot, #Req r) {
+    boolean enqueueWaiting(int64 conn, #Req r) {
         if (this.waitQ == null) {
             this.waitQ = heap Channel<Inbound>(this.queueBound);
         }
         if (this.qCount >= this.queueBound) {
             return false;
         }
-        Inbound e = heap Inbound(connSlot, #r);
+        Inbound e = heap Inbound(Inbound.MESSAGE, conn, #r);
         if (!this.waitQ.trySend(#e)) {
             return false;
         }
@@ -573,9 +564,8 @@ public final class Host implements TokenSink {
             if (q == null) {
                 return;
             }
-            int32 qcs = q.connSlot;
-            WsConn c = this.conns[qcs];
-            if (c == null || c.dead) {
+            int64 qcs = q.conn;
+            if (!this.front.isOpen(qcs)) {
                 continue;
             }
             int64 nowMs = Clock.nanoTime() / 1000000L;
@@ -634,8 +624,7 @@ public final class Host implements TokenSink {
                     if (this.chunker.hasTail(i)) {
                         String tailS #= this.chunker.flushTail(i);
                         if (tailS.byteLength() > 0) {
-                            String tm #= Wire.chunk(this.trId[i], tailS);
-                            this.say(this.trConn[i], #tm);
+                            this.sendChunk(this.trConn[i], this.trId[i], tailS);
                         }
                     }
                     String finish = "budget";
@@ -699,7 +688,7 @@ public final class Host implements TokenSink {
             }
             String qm #= Wire.error(q.req.id, q.req.hasId, ErrKind.INTERNAL,
                 "engine failed before this request started", false);
-            this.say(q.connSlot, #qm);
+            this.say(q.conn, #qm);
         }
         this.live = 0;
         return;
@@ -716,11 +705,11 @@ public final class Host implements TokenSink {
         return;
     }
 
-    /** The in-flight slot carrying caller id `id` on `connSlot`, or -1. */
-    int32 slotOfId(int32 connSlot, int64 id) {
+    /** The in-flight slot carrying caller id `id` on `conn`, or -1. */
+    int32 slotOfId(int64 conn, int64 id) {
         int32 i = 0;
         while (i < this.cap) {
-            if (this.trOpen[i] && this.trConn[i] == connSlot
+            if (this.trOpen[i] && this.trConn[i] == conn
                     && this.trId[i] == id) {
                 return i;
             }
@@ -749,8 +738,7 @@ public final class Host implements TokenSink {
                 int8[] raw #= this.engine.tokenizer().decode(this.oneTok, 1);
                 String s #= this.chunker.takeOwned(i, #raw);
                 if (s.byteLength() > 0) {
-                    String m #= Wire.chunk(this.trId[i], s);
-                    this.say(this.trConn[i], #m);
+                    this.sendChunk(this.trConn[i], this.trId[i], s);
                 }
                 return;
             }
@@ -759,21 +747,35 @@ public final class Host implements TokenSink {
         return;
     }
 
-    /** Stop: end the accept loop and every connection's fibers. */
+    /** Stop: no more requests reach the loop, every connection closes
+     *  with 1001, and the server's fibers end. */
     public void shutdown() {
         this.stopping = true;
-        if (this.listener != null) {
-            this.listener.close();
-        }
-        int32 i = 0;
-        while (i < this.maxConns) {
-            WsConn c = this.conns[i];
-            if (c != null) {
-                c.stopAll();
+        this.front.inCh.close();
+        if (this.web != null) {
+            this.web.shutdown(Duration.ofSeconds(2L));
+            int32 polls0 = 0;
+            while (this.served.load() == 0 && polls0 < 400) {
+                Fiber.sleep(Duration.ofMillis(5L));
+                polls0 = polls0 + 1;
             }
-            i = i + 1;
+            // A close hook can still be running after the server stops,
+            // and it reads the front: wait for the last one to finish.
+            int32 polls = 0;
+            while (this.front.liveCount() > 0 && polls < 400) {
+                Fiber.sleep(Duration.ofMillis(5L));
+                polls = polls + 1;
+            }
         }
         return;
+    }
+
+    /** The close code of the connection that closed last, or 0. */
+    public int32 lastCloseCode() {
+        if (this.web == null) {
+            return 0;
+        }
+        return this.web.connections().lastCloseCode();
     }
 
     public int32 openSessions() {
