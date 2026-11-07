@@ -247,23 +247,18 @@ public final class Host implements TokenSink {
     /** Bind the server on loopback:`port` (0 = ephemeral) and start it
      *  serving. `port` reports what was bound. */
     public void listen(int32 port) {
-        // The hooks reach the front through `Front.serving` and capture
-        // nothing. A capturing handler's closure was freed while the server
-        // still held it, even handed over with `#` (2026-11-07, primavera
-        // 0.6.0 on cajeta v0.52.0): the first message jumped through a freed
-        // function pointer. Primavera's own handlers capture nothing.
-        Front.serving #= this.front;
+        Front f = this.front;
         Endpoints api = heap Endpoints();
         api.route("GET", "/health",
-            (RequestView q, Response r) -> Front.health(q, r));
+            (RequestView q, Response r) -> Front.health(f, q, r));
         if (this.webDir != null) {
             api.staticDir("/", this.webDir);
         }
         WebSocketEndpoints ws = heap WebSocketEndpoints();
         ws.queueBytes(this.queueBytes);
-        ws.json("/ws", (Connection c) -> Front.opened(c),
-            (Connection c, JsonBody b) -> Front.message(c, b),
-            (Connection c, int32 code) -> Front.closed(c, code));
+        ws.json("/ws", (Connection c) -> Front.opened(f, c),
+            (Connection c, JsonBody b) -> Front.message(f, c, b),
+            (Connection c, int32 code) -> Front.closed(f, c, code));
         WebServerBuilder b #= WebServer.builder();
         b.bind("127.0.0.1:" + port);
         b.endpoints(#api);
@@ -275,8 +270,9 @@ public final class Host implements TokenSink {
         return;
     }
 
-    // The serve fiber outlives `listen`'s frame, so nothing it throws is
-    // left for an await to carry across: it ends by raising `served`.
+    // The serve fiber ends by raising `served`, which shutdown waits on.
+    // `await this.serveTask` is not used: an await on a field read returns
+    // garbage and faults when the task throws (cajeta v0.52.0, 2026-11-07).
     static async int32 serveWeb(Host h) {
         try {
             h.web.serve();

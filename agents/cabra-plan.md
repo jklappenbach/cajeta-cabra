@@ -687,12 +687,13 @@ fiber-crossing request scope; a byte-bounded send queue.*
       place from `JsonBody.bytes()`, and chunk lines encode straight into
       the send ring through one reused `ChunkLine` (`sendEncoded`). A close
       cancels that connection's turns. The `Turn` objects and the
-      components remain. Two workarounds stand in for cajeta bugs to file:
-      a capturing handler's closure was freed while the server held it, so
-      the hooks capture nothing and reach the front through
-      `Front.serving`; and an await of the serve task outside the scope
-      that spawned it rethrew a freed exception, so the serve fiber raises
-      a flag instead.)*
+      components remain. Two workarounds stood in for bugs: a capturing
+      handler's closure was freed while the server held it, so
+      the hooks reached the front through a static
+      until primavera 0.6.1 kept capturing handlers (they capture the
+      front again since); and `await this.serveTask`, an await on a field
+      read, returns garbage and faults on a throw (a compiler bug, measured
+      on v0.52.0), so the serve fiber raises a flag instead.)*
 - [ ] 12.2.3 `docs/architecture.md`: cabra as a primavera application.
 
 ### 12.3 Acceptance

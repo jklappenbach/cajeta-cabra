@@ -25,11 +25,6 @@ import dev.cajeta.cabra.proto.Req;
  */
 public final class Front {
 
-    /** The front of the host that is serving, which the hooks use. One
-     *  host serves at a time; `listen` sets it. A borrow: the host owns
-     *  its front. */
-    public static Front serving;
-
     String token;               // owned; "" = auth disabled
     String state;               // what /health reports
     public Channel<Inbound> inCh;   // to the host loop
@@ -80,8 +75,7 @@ public final class Front {
     }
 
     /** The open hook: claims a slot, or refuses the connection with 1013. */
-    public static void opened(Connection c) {
-        Front f = Front.serving;
+    public static void opened(Front f, Connection c) {
         boolean took = false;
         {
             LockGuard g #= f.mu.acquire();
@@ -103,8 +97,7 @@ public final class Front {
     }
 
     /** The message hook: parse in place, gate on auth, hand the request over. */
-    public static void message(Connection c, JsonBody b) {
-        Front f = Front.serving;
+    public static void message(Front f, Connection c, JsonBody b) {
         Req r #= Front.parse(b);
         int32 slot = f.slotOf(c.id());
         if (slot < 0) {
@@ -142,8 +135,7 @@ public final class Front {
 
     /** The close hook: frees the slot and tells the host. Never parks: the
      *  host loop may already have stopped. */
-    public static void closed(Connection c, int32 code) {
-        Front f = Front.serving;
+    public static void closed(Front f, Connection c, int32 code) {
         int64 id = c.id();
         {
             LockGuard g #= f.mu.acquire();
@@ -172,8 +164,7 @@ public final class Front {
     }
 
     /** `GET /health`: the host's state as a JSON object. */
-    public static void health(RequestView q, Response r) {
-        Front f = Front.serving;
+    public static void health(Front f, RequestView q, Response r) {
         r.json(200).field("state", f.state).end();
         return;
     }
