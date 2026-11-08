@@ -1,0 +1,71 @@
+package dev.cajeta.cabra.ws;
+
+import cajeta.lang.String;
+import cajeta.time.Clock;
+import dev.cajeta.primavera.web.ConnectionRegistry;
+
+/**
+ * One generation, from submit to its done line (spec §11.2, plan 12.1.3):
+ * the request it serves, the session it runs in, and the emitter for its
+ * output. A turn outlives the message that started it and is read on the
+ * host loop while primavera's writer fiber sends what it queued, so its
+ * state lives here rather than in any ambient request scope. Its chunks go
+ * to its own connection under its own wire id, encoded straight into that
+ * connection's send ring.
+ */
+public final class Turn {
+
+    public int32 rid;           // scheduler request id
+    public int64 id;            // the caller's wire id
+    public int64 conn;          // the connection's registry id
+    public String session;      // owned; null for a sessionless turn
+    public int32 promptLen;
+    public int64 t0Ns;          // submit time; usage's prefill_ms base
+    public int64 firstNs;       // first token; 0 until one arrives
+    public boolean diag;        // §10.9: this request asked for records
+
+    ConnectionRegistry conns;   // borrow; the server's
+    ChunkLine line;             // borrow; the host's, reused per chunk
+
+    public Turn(int32 rid, int64 id, int64 conn, String session, int32 promptLen,
+            boolean diag, ^ConnectionRegistry conns, ^ChunkLine line) {
+        this.rid = rid;
+        this.id = id;
+        this.conn = conn;
+        if (session != null) {
+            this.session #= session.clone();
+        } else {
+            this.session = null;
+        }
+        this.promptLen = promptLen;
+        this.t0Ns = Clock.nanoTime();
+        this.firstNs = 0L;
+        this.diag = diag;
+        this.conns = conns;
+        this.line = line;
+        return;
+    }
+
+    /** Notes the first token's time, once. */
+    public void tokenArrived() {
+        if (this.firstNs == 0L) {
+            this.firstNs = Clock.nanoTime();
+        }
+        return;
+    }
+
+    /** One chunk of this turn's text, encoded straight into its connection's
+     *  ring. A connection that has closed takes nothing. */
+    public void chunk(String text) {
+        this.line.set(this.id, text);
+        this.conns.sendEncoded(this.conn, this.line);
+        return;
+    }
+
+    /** A whole line for this turn's connection (a diag record, the done
+     *  line); the ring copies it. */
+    public void say(String m) {
+        this.conns.send(this.conn, m);
+        return;
+    }
+}

@@ -13,6 +13,7 @@ import dev.cajeta.llm.chat.ChatTemplate;
 import dev.cajeta.llm.gen.SampleParams;
 import dev.cajeta.llm.gen.TokenSink;
 import dev.cajeta.llm.sched.Request;
+import dev.cajeta.primavera.context.TimeSource;
 import dev.cajeta.primavera.web.Connection;
 import dev.cajeta.primavera.web.Endpoints;
 import dev.cajeta.primavera.web.JsonBody;
@@ -70,17 +71,10 @@ public final class Host implements TokenSink {
     public int32 port;
     boolean stopping;
 
-    // In-flight table: the Serve demux plus the connection column.
+    // In-flight table: one Turn per generation (§11.2), slot-indexed.
     int32 cap;
     int32 live;
-    int32[] trRid;
-    int64[] trId;
-    int64[] trConn;            // the connection's registry id
-    int32[] trPromptLen;
-    int64[] trT0Ns;            // submit time; usage's prefill_ms base
-    int64[] trFirstNs;         // first token; 0 until one arrives
-    boolean[] trOpen;
-    boolean[] trDiag;          // §10.9: this request asked for records
+    Turn[] turns;              // owned; slot-indexed, null = free (§11.2)
     int32 idleSteps;
     int32[] oneTok;            // the token id decode reads, reused per token
 
@@ -117,14 +111,7 @@ public final class Host implements TokenSink {
         this.stopping = false;
         this.cap = maxSessions;
         this.live = 0;
-        this.trRid = heap int32[this.cap];
-        this.trId = heap int64[this.cap];
-        this.trConn = heap int64[this.cap];
-        this.trPromptLen = heap int32[this.cap];
-        this.trT0Ns = heap int64[this.cap];
-        this.trFirstNs = heap int64[this.cap];
-        this.trOpen = heap boolean[this.cap];
-        this.trDiag = heap boolean[this.cap];
+        this.turns = heap Turn[this.cap];
         this.idleSteps = 0;
         this.oneTok = null;
         this.diagQ = null;
@@ -205,11 +192,11 @@ public final class Host implements TokenSink {
             int64 rid = this.diagQ.outSession(k);
             int32 i = 0;
             while (i < this.cap) {
-                if (this.trOpen[i] && this.trDiag[i]
-                        && (int64) this.trRid[i] == rid) {
+                Turn t = this.turns[i];
+                if (t != null && t.diag && (int64) t.rid == rid) {
                     String body #= this.diagQ.outJson(k);
-                    String m #= Wire.diag(this.trId[i], body);
-                    this.say(this.trConn[i], #m);
+                    String m #= Wire.diag(t.id, body);
+                    t.say(m);
                     break;
                 }
                 i = i + 1;
@@ -286,13 +273,6 @@ public final class Host implements TokenSink {
         return;
     }
 
-    /** One chunk line, encoded straight into the connection's ring. */
-    void sendChunk(int64 conn, int64 id, String text) {
-        this.line.set(id, text);
-        this.web.connections().sendEncoded(conn, this.line);
-        return;
-    }
-
     /** The host loop — run on the main thread until shutdown. */
     public void run() {
         while (!this.stopping) {
@@ -329,7 +309,7 @@ public final class Host implements TokenSink {
         if (!this.front.isOpen(conn)) {
             return;
         }
-        int64 nowMs = Clock.nanoTime() / 1000000L;
+        int64 nowMs = this.reg.now();
         this.reg.expire(nowMs);
         // 7.2.3: the auth gate ran in `Front` on the connection's fiber,
         // so an unauthed connection never reaches here.
@@ -385,7 +365,7 @@ public final class Host implements TokenSink {
             // refusal carrying the id; the done line (finish "cancel")
             // follows on the next reap.
             int32 slot = r.hasId ? this.slotOfId(conn, r.id) : (0 - 1);
-            if (slot < 0 || !this.engine.cancel(this.trRid[slot])) {
+            if (slot < 0 || !this.engine.cancel(this.turns[slot].rid)) {
                 String m #= Wire.error(r.id, r.hasId, ErrKind.BAD_REQUEST,
                     "cancel: no request " + r.id
                     + " in flight on this connection", false);
@@ -417,8 +397,9 @@ public final class Host implements TokenSink {
     void connClosed(int64 conn) {
         int32 i = 0;
         while (i < this.cap) {
-            if (this.trOpen[i] && this.trConn[i] == conn) {
-                this.engine.cancel(this.trRid[i]);
+            Turn t = this.turns[i];
+            if (t != null && t.conn == conn) {
+                this.engine.cancel(t.rid);
             }
             i = i + 1;
         }
@@ -482,14 +463,9 @@ public final class Host implements TokenSink {
         }
         this.ensureChunker();
         this.chunker.reset(slot);
-        this.trRid[slot] = rid;
-        this.trId[slot] = r.id;
-        this.trConn[slot] = conn;
-        this.trPromptLen[slot] = n;
-        this.trT0Ns[slot] = Clock.nanoTime();
-        this.trFirstNs[slot] = 0L;
-        this.trOpen[slot] = true;
-        this.trDiag[slot] = r.diag;
+        String sess = r.hasSession ? r.session : null;
+        this.turns[slot] = heap Turn(rid, r.id, conn, sess, n, r.diag,
+            this.web.connections(), this.line);
         if (r.diag) {
             this.diagArm();
         }
@@ -500,7 +476,7 @@ public final class Host implements TokenSink {
     int32 freeReqSlot() {
         int32 i = 0;
         while (i < this.cap) {
-            if (!this.trOpen[i]) {
+            if (this.turns[i] == null) {
                 return i;
             }
             i = i + 1;
@@ -559,7 +535,7 @@ public final class Host implements TokenSink {
             if (!this.front.isOpen(qcs)) {
                 continue;
             }
-            int64 nowMs = Clock.nanoTime() / 1000000L;
+            int64 nowMs = this.reg.now();
             this.reg.expire(nowMs);
             Req qr #= q.req;
             if (qr.hasSession) {
@@ -608,14 +584,15 @@ public final class Host implements TokenSink {
         int32 done = 0;
         int32 i = 0;
         while (i < this.cap) {
-            if (this.trOpen[i]) {
-                Request q = this.engine.request(this.trRid[i]);
+            Turn t = this.turns[i];
+            if (t != null) {
+                Request q = this.engine.request(t.rid);
                 if (q.finishReason() != Request.FINISH_NONE) {
                     this.ensureChunker();
                     if (this.chunker.hasTail(i)) {
                         String tailS #= this.chunker.flushTail(i);
                         if (tailS.byteLength() > 0) {
-                            this.sendChunk(this.trConn[i], this.trId[i], tailS);
+                            t.chunk(tailS);
                         }
                     }
                     String finish = "budget";
@@ -633,19 +610,19 @@ public final class Host implements TokenSink {
                     int64 endNs = Clock.nanoTime();
                     int64 pMs = 0L;
                     int64 dMs = 0L;
-                    if (this.trFirstNs[i] > 0L) {
-                        pMs = (this.trFirstNs[i] - this.trT0Ns[i]) / 1000000L;
-                        dMs = (endNs - this.trFirstNs[i]) / 1000000L;
+                    if (t.firstNs > 0L) {
+                        pMs = (t.firstNs - t.t0Ns) / 1000000L;
+                        dMs = (endNs - t.firstNs) / 1000000L;
                     } else {
-                        pMs = (endNs - this.trT0Ns[i]) / 1000000L;
+                        pMs = (endNs - t.t0Ns) / 1000000L;
                     }
-                    String m #= Wire.doneUsage(this.trId[i], finish,
-                        (int64) this.trPromptLen[i],
+                    String m #= Wire.doneUsage(t.id, finish,
+                        (int64) t.promptLen,
                         (int64) q.generatedCount(), pMs, dMs);
-                    this.say(this.trConn[i], #m);
-                    this.trOpen[i] = false;
-                    if (this.trDiag[i]) {
-                        this.trDiag[i] = false;
+                    t.say(m);
+                    boolean wanted = t.diag;
+                    this.turns[i] = null;
+                    if (wanted) {
                         this.diagDisarm();
                     }
                     this.live = this.live - 1;
@@ -660,12 +637,13 @@ public final class Host implements TokenSink {
     void failAllOpen() {
         int32 i = 0;
         while (i < this.cap) {
-            if (this.trOpen[i]) {
-                String m #= Wire.done(this.trId[i], "error");
-                this.say(this.trConn[i], #m);
-                this.trOpen[i] = false;
-                if (this.trDiag[i]) {
-                    this.trDiag[i] = false;
+            Turn t = this.turns[i];
+            if (t != null) {
+                String m #= Wire.done(t.id, "error");
+                t.say(m);
+                boolean wanted = t.diag;
+                this.turns[i] = null;
+                if (wanted) {
                     this.diagDisarm();
                 }
             }
@@ -700,8 +678,8 @@ public final class Host implements TokenSink {
     int32 slotOfId(int64 conn, int64 id) {
         int32 i = 0;
         while (i < this.cap) {
-            if (this.trOpen[i] && this.trConn[i] == conn
-                    && this.trId[i] == id) {
+            Turn t = this.turns[i];
+            if (t != null && t.conn == conn && t.id == id) {
                 return i;
             }
             i = i + 1;
@@ -709,7 +687,7 @@ public final class Host implements TokenSink {
         return 0 - 1;
     }
 
-    /** TokenSink: rid -> (wireId, conn); decode one token, hold back
+    /** TokenSink: rid -> its turn; decode one token, hold back
      *  any incomplete UTF-8 tail, enqueue the complete part. */
     public void onToken(int32 reqId, int32 tok) {
         if (this.engine.isEog(tok)) {
@@ -717,10 +695,9 @@ public final class Host implements TokenSink {
         }
         int32 i = 0;
         while (i < this.cap) {
-            if (this.trOpen[i] && this.trRid[i] == reqId) {
-                if (this.trFirstNs[i] == 0L) {
-                    this.trFirstNs[i] = Clock.nanoTime();
-                }
+            Turn t = this.turns[i];
+            if (t != null && t.rid == reqId) {
+                t.tokenArrived();
                 this.ensureChunker();
                 if (this.oneTok == null) {
                     this.oneTok = heap int32[1];
@@ -729,7 +706,7 @@ public final class Host implements TokenSink {
                 int8[] raw #= this.engine.tokenizer().decode(this.oneTok, 1);
                 String s #= this.chunker.takeOwned(i, #raw);
                 if (s.byteLength() > 0) {
-                    this.sendChunk(this.trConn[i], this.trId[i], s);
+                    t.chunk(s);
                 }
                 return;
             }
@@ -763,6 +740,13 @@ public final class Host implements TokenSink {
             return 0;
         }
         return this.web.connections().lastCloseCode();
+    }
+
+    /** Install the clock sessions expire by (plan 12.1.2); the caller keeps
+     *  it alive while the host runs. Turn timing stays on the monotonic clock. */
+    public void useClock(^TimeSource c) {
+        this.reg.useClock(c);
+        return;
     }
 
     public int32 openSessions() {

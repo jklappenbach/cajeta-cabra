@@ -18,6 +18,7 @@ import dev.cajeta.http.ws.WebSocket;
 import dev.cajeta.http.ws.WsMessage;
 import dev.cajeta.http.ws.WsUpgrade;
 import dev.cajeta.llm.LlmEngine;
+import dev.cajeta.primavera.context.ManualTimeSource;
 import dev.cajeta.cabra.proto.ErrKind;
 import dev.cajeta.cabra.ws.Host;
 
@@ -641,6 +642,194 @@ public class HostTest {
         Fiber.sleep(Duration.ofMillis(200L));
         s3.close();
         return 0;
+    }
+
+    /** Evidence for 12.1.3: two turns' chunks, one connection. */
+    static class PairRun {
+        public int32 port;
+        public String accA;
+        public String accB;
+        public String finA;
+        public String finB;
+        public String sidA;
+        public String sidB;
+        public PairRun() {
+            this.port = 0;
+            this.accA = "";
+            this.accB = "";
+            this.finA = "";
+            this.finB = "";
+            this.sidA = null;
+            this.sidB = null;
+        }
+    }
+
+    static #String openOn(WebSocket ws, int64 id) {
+        ws.send("{\"op\":\"open\",\"id\":" + id + "}");
+        String op #= HostTest.recvText(ws);
+        JsonValue ov #= Json.parse(op);
+        return #= "" + ov.object().get("session").asString();
+    }
+
+    /** 12.1.3: two sessions on ONE connection, two generates back to back,
+     *  read interleaved; each id's chunks are collected apart. */
+    static async int32 runPair(PairRun pr) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, pr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dialAuthed(pr.port, rd, wr);
+        pr.sidA #= HostTest.openOn(ws, 70L);
+        pr.sidB #= HostTest.openOn(ws, 80L);
+        ws.send("{\"op\":\"generate\",\"id\":1,\"session\":\"" + pr.sidA
+            + "\",\"prompt\":\"" + ConcurrencyTest.PROMPT_A + "\",\"n\":6,\"temp\":0}");
+        ws.send("{\"op\":\"generate\",\"id\":2,\"session\":\"" + pr.sidB
+            + "\",\"prompt\":\"" + ConcurrencyTest.PROMPT_B + "\",\"n\":6,\"temp\":0}");
+        while (pr.finA.byteLength() == 0 || pr.finB.byteLength() == 0) {
+            String line #= HostTest.recvText(ws);
+            if (line == null) {
+                break;
+            }
+            JsonValue v #= Json.parse(line);
+            JsonObject o = v.object();
+            int64 id = o.containsKey("id") ? o.get("id").asInt64() : (0L - 1L);
+            if (o.containsKey("chunk")) {
+                String t #= o.get("chunk").asString();
+                if (id == 1L) {
+                    pr.accA = pr.accA + t;
+                } else if (id == 2L) {
+                    pr.accB = pr.accB + t;
+                }
+            } else if (o.containsKey("done") || o.containsKey("error")) {
+                String f = o.containsKey("done") ? "done" : "error";
+                if (id == 1L) {
+                    pr.finA #= "" + f;
+                } else if (id == 2L) {
+                    pr.finB #= "" + f;
+                }
+            }
+        }
+        ws.send("{\"op\":\"shutdown\"}");
+        Fiber.sleep(Duration.ofMillis(200L));
+        sock.close();
+        return 0;
+    }
+
+    /** 12.1.3 — two concurrent turns on one connection, each in its own
+     *  session, emit only their own chunks, byte-equal to their solos. */
+    @Test
+    public void twoTurnsOnOneConnectionKeepTheirOwnChunks() {
+        String soloA #= ConcurrencyTest.serialRun("tmp/ht-pair-a.jsonl",
+            1L, ConcurrencyTest.PROMPT_A);
+        String soloB #= ConcurrencyTest.serialRun("tmp/ht-pair-b.jsonl",
+            2L, ConcurrencyTest.PROMPT_B);
+        LlmEngine e #= ConcurrencyTest.engine(2);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 2, 60000L);
+        h.listen(0);
+        PairRun pr = heap PairRun();
+        pr.port = h.port;
+        scope {
+            spawn runPair(pr);
+            h.run();
+            h.shutdown();
+        }
+        Assert.isFalse(pr.sidA.equals(pr.sidB));
+        Assert.equals("done", pr.finA);
+        Assert.equals("done", pr.finB);
+        Assert.equals(soloA, pr.accA);
+        Assert.equals(soloB, pr.accB);
+    }
+
+    /** Evidence for 12.1.2: each turn's outcome at its clock time. */
+    static class ClockRun {
+        public int32 port;
+        public ManualTimeSource clock;      // borrow; the test owns it
+        public String at0;
+        public String at45;
+        public String at90;
+        public String at151;
+        public ClockRun() {
+            this.port = 0;
+            this.clock = null;
+            this.at0 = "";
+            this.at45 = "";
+            this.at90 = "";
+            this.at151 = "";
+        }
+    }
+
+    /** One 1-token generate in `session`: its finish, or the error kind,
+     *  or "cut" when the connection ends first. */
+    static #String turnIn(WebSocket ws, String session, int64 id) {
+        ws.send("{\"op\":\"generate\",\"id\":" + id + ",\"session\":\"" + session
+            + "\",\"prompt\":\"" + ConcurrencyTest.PROMPT_A + "\",\"n\":1,\"temp\":0}");
+        while (true) {
+            String line #= HostTest.recvText(ws);
+            if (line == null) {
+                return "cut";
+            }
+            JsonValue v #= Json.parse(line);
+            JsonObject o = v.object();
+            if (o.containsKey("error")) {
+                String k #= o.get("kind").asString();
+                return #k;
+            }
+            if (o.containsKey("done")) {
+                String f #= o.get("finish").asString();
+                return #f;
+            }
+        }
+    }
+
+    /** 12.1.2: turns at 0, 45, 90 and 151 s on the installed clock, with a
+     *  60 s idle bound. The turn at 90 s is open only if the one at 45 s
+     *  refreshed the session; at 151 s it has been idle 61 s. */
+    static async int32 runClocked(ClockRun cr) {
+        IpAddress a #= IpAddress.loopbackV4();
+        SocketAddress addr #= SocketAddress.of(#a, cr.port);
+        TcpStream sock #= TcpStream.connectAsync(#addr);
+        AsyncReader rd = heap AsyncReader(sock);
+        AsyncWriter wr = heap AsyncWriter(sock);
+        WebSocket ws #= HostTest.dialAuthed(cr.port, rd, wr);
+        ws.send("{\"op\":\"open\",\"id\":60}");
+        String op #= HostTest.recvText(ws);
+        JsonValue ov #= Json.parse(op);
+        String sid #= "" + ov.object().get("session").asString();
+        cr.at0 #= HostTest.turnIn(ws, sid, 61L);
+        cr.clock.advance(45000L);
+        cr.at45 #= HostTest.turnIn(ws, sid, 62L);
+        cr.clock.advance(45000L);
+        cr.at90 #= HostTest.turnIn(ws, sid, 63L);
+        cr.clock.advance(61000L);
+        cr.at151 #= HostTest.turnIn(ws, sid, 64L);
+        ws.send("{\"op\":\"shutdown\"}");
+        Fiber.sleep(Duration.ofMillis(200L));
+        sock.close();
+        return 0;
+    }
+
+    /** 12.1.2 — session expiry follows primavera's clock: a turn before the
+     *  idle bound keeps the session, and one past it is session_gone. */
+    @Test
+    public void idleExpiryFollowsTheInstalledClock() {
+        LlmEngine e #= ConcurrencyTest.engine(1);
+        Host h = heap Host(#e, HostTest.TOKEN, 4, 1, 60000L);
+        ManualTimeSource clock = heap ManualTimeSource(1000000L);
+        h.useClock(clock);
+        h.listen(0);
+        ClockRun cr = heap ClockRun();
+        cr.port = h.port;
+        cr.clock #= clock;
+        scope {
+            spawn runClocked(cr);
+            h.run();
+            h.shutdown();
+        }
+        Assert.equals("budget", cr.at0);
+        Assert.equals("budget", cr.at45);
+        Assert.equals("budget", cr.at90);
+        Assert.equals(ErrKind.SESSION_GONE, cr.at151);
     }
 
     /** 12.1.5 — past the byte bound the connection closes with 1008 and

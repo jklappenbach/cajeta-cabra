@@ -3,6 +3,8 @@ package dev.cajeta.cabra.core;
 import cajeta.lang.String;
 import dev.cajeta.primavera.context.SessionState;
 import dev.cajeta.primavera.context.SessionStore;
+import dev.cajeta.primavera.context.SystemTimeSource;
+import dev.cajeta.primavera.context.TimeSource;
 
 /**
  * cabra's sessions (spec §5.2) as a primavera `SessionStore` (spec §11.1,
@@ -13,8 +15,10 @@ import dev.cajeta.primavera.context.SessionStore;
  * come from the store, which tells an ended issued id from a forged one by
  * its MAC.
  *
- * Time is a PARAMETER, never read here: the store's `...At(now)` forms take
- * it, so expiry is testable with a scripted clock and the caller owns "now".
+ * Time is primavera's clock (plan 12.1.2): `now()` reads it, the system
+ * clock unless a test installs another with `useClock`, and the `...At(now)`
+ * forms take the time it gave. A caller that owns its own "now" (the stdio
+ * core's scripted tests) passes it straight in.
  *
  * Sessions leave the store through its eviction observer, which counts them
  * by reason; the store logs each one (§8.6). Host-side KV is a cache, never
@@ -29,16 +33,34 @@ public final class Sessions {
 
     SessionStore store;     // owned
     EvictionTally tally;    // owned; the observer's counters
+    SystemTimeSource system; // owned; the default clock
+    TimeSource clock;       // borrow: `system`, or the one useClock installed
 
     public Sessions(int32 capacity, int64 idleExpiryMs) {
         this.store = heap SessionStore();
         this.store.setCapacity(capacity);
         this.store.setIdleTtl(idleExpiryMs);
+        this.system = heap SystemTimeSource();
+        this.clock #= this.system;
+        this.store.setTimeSource(this.clock);
         this.tally = heap EvictionTally();
         EvictionTally t = this.tally;
         this.store.setEvictionObserver(
             (String id, int32 reason) -> EvictionTally.note(t, id, reason));
         return;
+    }
+
+    /** Install the clock sessions expire by. The caller keeps it alive for as
+     *  long as these sessions are used: a test's ManualTimeSource. */
+    public void useClock(^TimeSource c) {
+        this.clock = c;
+        this.store.setTimeSource(c);
+        return;
+    }
+
+    /** The current time on the installed clock, in milliseconds. */
+    public int64 now() {
+        return this.clock.now();
     }
 
     /** Open a session: its issued id, or null when every slot is held

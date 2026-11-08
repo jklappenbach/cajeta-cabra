@@ -637,14 +637,20 @@ fiber-crossing request scope; a byte-bounded send queue.*
       (spec §11.5, Julian 2026-11-06): expected bytes carry it as a JSON
       string, and a forged id of the issued shape answers `session_gone`
       only when the store issued it.
-- [ ] 12.1.2 Session expiry under a `ManualTimeSource`: open, advance past
+- [x] 12.1.2 Session expiry under a `ManualTimeSource`: open, advance past
       idle, `session_gone`; touch before expiry keeps it (§5.2.4, now
       primavera's clock).
-- [ ] 12.1.3 A `Turn` carries one generation across the host loop and the
+- [~] 12.1.3 A `Turn` carries one generation across the host loop and the
       writer: two concurrent turns on one connection, each in its own
       session, emit only their own chunks, byte-equal to their solos; a
       session-scoped component resolved for a turn is that session's
       instance.
+      *(2026-11-08: the first half is in. `ws/Turn` holds the request, its
+      session and its emitter, and `Host` keeps one per in-flight slot in
+      place of eight parallel arrays; HostTest's
+      `twoTurnsOnOneConnectionKeepTheirOwnChunks` pins two turns on one
+      connection to their solos. The session-scoped component half waits on
+      12.2.2's components.)*
 - [x] 12.1.4 The declared surface: `GET /health` is a typed `Endpoints`
       route returning the health object; `web/dist` is a static mount
       (`/` → `index.html`, a missing asset 404); `/ws` is a
