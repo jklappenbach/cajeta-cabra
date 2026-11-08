@@ -32,7 +32,9 @@ jobs:
       # v0.39.0: 56 passed, 2026-10-10. v0.44.0 (the first without the stdlib
       # crypto, so http 0.9.0 and crypto 0.1.0): 56 passed, 0 failed, 2
       # skipped, both from sibling checkouts and from Olla, 2026-10-19.
-      CAJETA_VERSION: v0.52.0
+      # v0.53.1 (await on a field Task): 79 passed, 0 failed, 2 skipped,
+      # 2026-11-07.
+      CAJETA_VERSION: v0.53.1
     steps:
       - name: Check out cabra
         uses: actions/checkout@v4

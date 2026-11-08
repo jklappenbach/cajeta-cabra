@@ -692,8 +692,8 @@ fiber-crossing request scope; a byte-bounded send queue.*
       the hooks reached the front through a static
       until primavera 0.6.1 kept capturing handlers (they capture the
       front again since); and `await this.serveTask`, an await on a field
-      read, returns garbage and faults on a throw (a compiler bug, measured
-      on v0.52.0), so the serve fiber raises a flag instead.)*
+      read, returned garbage and faulted on a throw until cajeta v0.53.1
+      fixed it; shutdown awaits the serve task again since.)*
 - [ ] 12.2.3 `docs/architecture.md`: cabra as a primavera application.
 
 ### 12.3 Acceptance

@@ -1,7 +1,6 @@
 package dev.cajeta.cabra.ws;
 
 import cajeta.collection.ArrayList;
-import cajeta.concurrent.AtomicInt32;
 import cajeta.concurrent.Channel;
 import cajeta.concurrent.Fiber;
 import cajeta.lang.Optional;
@@ -66,7 +65,6 @@ public final class Host implements TokenSink {
     Front front;               // owned; the connection hooks
     WebServer web;             // owned; null until listen
     Task<int32> serveTask;
-    AtomicInt32 served;        // 1 once the serve fiber has returned
     int32 queueBytes;          // each connection's send bound
     ChunkLine line;            // reused for every chunk sent
     public int32 port;
@@ -113,7 +111,6 @@ public final class Host implements TokenSink {
         this.state = "ready";
         this.front = heap Front(token, maxConns);
         this.web = null;
-        this.served = heap AtomicInt32(0);
         this.queueBytes = 1048576;
         this.line = heap ChunkLine();
         this.port = 0;
@@ -270,16 +267,14 @@ public final class Host implements TokenSink {
         return;
     }
 
-    // The serve fiber ends by raising `served`, which shutdown waits on.
-    // `await this.serveTask` is not used: an await on a field read returns
-    // garbage and faults when the task throws (cajeta v0.52.0, 2026-11-07).
+    // Shutdown awaits this fiber. A throw out of serve is reported here
+    // rather than carried to shutdown, which has nothing to do with it.
     static async int32 serveWeb(Host h) {
         try {
             h.web.serve();
         } catch (Throwable t) {
             System.stderr.println("cabra: web server ended on a throw");
         }
-        h.served.store(1);
         return 1;
     }
 
@@ -750,11 +745,7 @@ public final class Host implements TokenSink {
         this.front.inCh.close();
         if (this.web != null) {
             this.web.shutdown(Duration.ofSeconds(2L));
-            int32 polls0 = 0;
-            while (this.served.load() == 0 && polls0 < 400) {
-                Fiber.sleep(Duration.ofMillis(5L));
-                polls0 = polls0 + 1;
-            }
+            int32 served = await this.serveTask;
             // A close hook can still be running after the server stops,
             // and it reads the front: wait for the last one to finish.
             int32 polls = 0;
